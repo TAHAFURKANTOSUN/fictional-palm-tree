@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>VoxelCraft — Rust + WebAssembly</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden; background: #0b0d12;
+    font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { display: block; }
+  #gl  { position: fixed; inset: 0; z-index: 1; }
+  #hud { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
+
+  /* ---------- Kaplamalar ---------- */
+  #loading, #overlay {
+    position: fixed; inset: 0; z-index: 40; display: flex;
+    align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 35%, #2b3a52, #0d1119 70%);
+  }
+  #overlay {
+    z-index: 41;
+    background: radial-gradient(circle at 50% 35%, rgba(43,58,82,.92), rgba(10,13,20,.97) 70%);
+  }
+  .panel {
+    width: min(600px, 92vw); padding: 30px 34px; border-radius: 16px; text-align: center;
+    background: rgba(16,20,29,.82); border: 1px solid rgba(255,255,255,.13);
+    box-shadow: 0 24px 70px rgba(0,0,0,.6); color: #eaf0f8;
+  }
+  .panel h1 {
+    font-size: 34px; letter-spacing: 2px; font-weight: 800; margin-bottom: 6px;
+    background: linear-gradient(180deg, #fff, #8fd06a);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .panel .sub { font-size: 13.5px; opacity: .72; margin-bottom: 20px; }
+  .grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 5px 30px; text-align: left;
+    font-size: 12.5px; margin-bottom: 22px;
+  }
+  .grid div {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,.09);
+  }
+  .grid b { color: #a8e07a; font-weight: 600; white-space: nowrap; }
+  .grid span { opacity: .82; text-align: right; white-space: nowrap; }
+  #startBtn {
+    padding: 12px 46px; font-size: 16px; font-weight: 700; letter-spacing: .6px;
+    border: none; border-radius: 10px; cursor: pointer; color: #0d1a06;
+    background: linear-gradient(180deg, #a6e06f, #6fbb3d);
+    box-shadow: 0 6px 20px rgba(120,200,70,.35);
+    transition: transform .1s, box-shadow .1s;
+  }
+  #startBtn:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(120,200,70,.45); }
+  #startBtn:active { transform: translateY(0); }
+  .bar {
+    width: 100%; height: 8px; border-radius: 5px; background: rgba(255,255,255,.12);
+    overflow: hidden; margin-top: 6px;
+  }
+  #barFill {
+    height: 100%; width: 0%; border-radius: 5px;
+    background: linear-gradient(90deg, #6fbb3d, #a6e06f);
+    transition: width .12s linear;
+  }
+  #loadingText { font-size: 14px; opacity: .85; margin-bottom: 12px; }
+  #err { color: #ff8a8a; font-size: 13px; line-height: 1.6; margin-top: 10px; }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+
+<div id="loading">
+  <div class="panel">
+    <h1>VoxelCraft</h1>
+    <p id="loadingText">Motor yükleniyor…</p>
+    <div class="bar"><div id="barFill"></div></div>
+    <div id="err"></div>
+  </div>
+</div>
+
+<div id="overlay" class="hide">
+  <div class="panel">
+    <h1>VoxelCraft</h1>
+    <p class="sub">Sonsuz, prosedürel voxel dünyası — Rust ile yazıldı, WebAssembly'ye derlendi</p>
+    <div class="grid">
+      <div><b>W A S D</b><span>Hareket</span></div>
+      <div><b>Fare</b><span>Etrafa bak</span></div>
+      <div><b>Sol Tık</b><span>Blok kır</span></div>
+      <div><b>Sağ Tık</b><span>Blok koy / Elma ye</span></div>
+      <div><b>E</b><span>Envanter &amp; Craft</span></div>
+      <div><b>F / Space ×2</b><span>Uçuş (Yaratıcı modda)</span></div>
+      <div><b>G</b><span>Yaratıcı / Hayatta Kalma</span></div>
+      <div><b>Space</b><span>Zıpla / Yukarı</span></div>
+      <div><b>Shift</b><span>Eğil / Aşağı</span></div>
+      <div><b>1 – 9 / Tekerlek</b><span>Yuva seç</span></div>
+      <div><b>Ctrl</b><span>Hızlı koş / Hızlı uç</span></div>
+      <div><b>[ ve ]</b><span>Görüş mesafesi</span></div>
+      <div><b>H</b><span>Arayüzü gizle</span></div>
+      <div><b>ESC</b><span>Fareyi bırak</span></div>
+    </div>
+    <button id="startBtn">Oyna</button>
+  </div>
+</div>
+
+<script type="module">
+  import init, * as wasm from './pkg/voxelcraft_rs.js';
+
+  const loadingText = document.getElementById('loadingText');
+  const errEl = document.getElementById('err');
+
+  // `requestPointerLock` kullanıcı hareketi olmadan reddedilir; reddi yutuyoruz
+  // ki konsola yakalanmamış bir Promise hatası düşmesin.
+  window.__requestLock = function (el) {
+    try {
+      const p = el && el.requestPointerLock && el.requestPointerLock();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) { /* fare kilidi desteklenmiyor */ }
+  };
+
+  try {
+    await init();
+    // Hata ayıklama / otomasyon kancası (tarayıcı konsolundan erişilebilir).
+    window.__vcRs = wasm;
+    loadingText.textContent = 'Dünya oluşturuluyor…';
+    wasm.start();
+  } catch (e) {
+    loadingText.textContent = 'Başlatılamadı';
+    errEl.textContent = String(e && e.message ? e.message : e);
+    console.error(e);
+  }
+</script>
+</body>
+</html>

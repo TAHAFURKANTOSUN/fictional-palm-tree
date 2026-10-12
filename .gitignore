@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────
+# VoxelCraft (Rust + WebAssembly) — .gitignore
+# Not: Cargo.lock bilerek DAHİL edilir. wasm-bindgen kütüphanesi
+# 0.2.129'a sabitlenmiştir ve CLI sürümünün bununla eşleşmesi gerekir.
+# ─────────────────────────────────────────────────────────────
+
+# ── Rust derleme çıktıları ───────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+
+# ── wasm-bindgen / paketleme çıktıları (build ile yeniden üretilir) ──
+/pkg/
+/pkg-nomodules/
+/voxelcraft-rs.html
+
+# ── Başsız tarayıcı testi çıktıları (tools/headless_test.mjs) ──
+/_rs_*.png
+
+# ── Node / Python (araç betikleri ve yerel sunucu) ───────────
+node_modules/
+npm-debug.log*
+__pycache__/
+*.py[cod]
+
+# ── Günlükler ve geçici dosyalar ─────────────────────────────
+*.log
+*.tmp
+*.temp
+*.bak
+*~
+
+# ── Düzenleyiciler / IDE ─────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+.fleet/
+.zed/
+
+# ── İşletim sistemi dosyaları ────────────────────────────────
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# macOS
+.DS_Store
+.AppleDouble
+._*
+
+# ── Ortam / gizli bilgiler ───────────────────────────────────
+.env
+.env.*
