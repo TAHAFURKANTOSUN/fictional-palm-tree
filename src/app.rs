@@ -28,6 +28,14 @@ const KEEP_MARGIN: i32 = 2;
 const WORK_BUDGET_MS: f64 = 4.0;
 const SENSITIVITY: f64 = 0.0022;
 
+/// Yüzme (H6): suda yerçekimi yerine yumuşak batma, `Space` ile yukarı çıkış.
+const SWIM_SPEED: f64 = 2.6;
+const SWIM_SPRINT_SPEED: f64 = 4.0;
+/// `Space` basılıyken hedeflenen dikey hız (yukarı).
+const SWIM_UP: f64 = 3.6;
+/// Hiçbir tuşa basılmazken hedeflenen dikey hız (yavaş batma).
+const SWIM_SINK: f64 = 1.5;
+
 struct Game {
     world: World,
     player: Player,
@@ -344,22 +352,46 @@ impl Game {
         }
     }
 
+    /// Değişen bloğun etkilediği chunk'ları yeniden mesh'ler.
+    ///
+    /// Yalnızca 4 kenar komşu yetmez: ambient occlusion çapraz komşuyu da okur
+    /// (`mesh.rs` → `sc`), bu yüzden köşedeki bir blok değişince çapraz chunk'ın
+    /// AO'su da tazelenmelidir; aksi hâlde dikiş izi kalır.
     fn remesh_around(&mut self, x: i32, _y: i32, z: i32) {
         let cx = x >> 4;
         let cz = z >> 4;
-        let mut targets = vec![(cx, cz)];
-        if x & 15 == 0 {
+        let west = x & 15 == 0;
+        let east = x & 15 == 15;
+        let north = z & 15 == 0;
+        let south = z & 15 == 15;
+
+        let mut targets: Vec<(i32, i32)> = Vec::with_capacity(9);
+        targets.push((cx, cz));
+        if west {
             targets.push((cx - 1, cz));
         }
-        if x & 15 == 15 {
+        if east {
             targets.push((cx + 1, cz));
         }
-        if z & 15 == 0 {
+        if north {
             targets.push((cx, cz - 1));
         }
-        if z & 15 == 15 {
+        if south {
             targets.push((cx, cz + 1));
         }
+        if west && north {
+            targets.push((cx - 1, cz - 1));
+        }
+        if west && south {
+            targets.push((cx - 1, cz + 1));
+        }
+        if east && north {
+            targets.push((cx + 1, cz - 1));
+        }
+        if east && south {
+            targets.push((cx + 1, cz + 1));
+        }
+
         for (tx, tz) in targets {
             let key = ckey(tx, tz);
             if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, tx, tz) {
@@ -493,8 +525,13 @@ impl Game {
         let want_sprint = k("ControlLeft") || k("ControlRight");
         let sprinting = want_sprint && self.survival.can_sprint();
 
+        // Ayaklar suyun içindeyse yüzme fiziği devreye girer (H6).
+        let in_water = self.player.feet_in_water(&self.world);
+
         let speed = if self.player.flying {
             if sprinting { 30.0 } else { 14.0 }
+        } else if in_water {
+            if sprinting { SWIM_SPRINT_SPEED } else { SWIM_SPEED }
         } else if sprinting && (k("KeyW") || k("ArrowUp")) {
             7.8
         } else if k("ShiftLeft") || k("ShiftRight") {
@@ -504,9 +541,11 @@ impl Game {
         };
 
         let blend = (dt * 12.0).min(1.0);
-        if self.player.flying {
-            self.player.vel[0] += (mx * speed - self.player.vel[0]) * blend;
-            self.player.vel[2] += (mz * speed - self.player.vel[2]) * blend;
+        if self.player.flying || in_water {
+            // Suda yatay hız da yumuşatılır (su direnci).
+            let b = if self.player.flying { blend } else { (dt * 6.0).min(1.0) };
+            self.player.vel[0] += (mx * speed - self.player.vel[0]) * b;
+            self.player.vel[2] += (mz * speed - self.player.vel[2]) * b;
         } else {
             self.player.vel[0] = mx * speed;
             self.player.vel[2] = mz * speed;
@@ -522,6 +561,13 @@ impl Game {
                 vy -= speed * 0.78;
             }
             self.player.vel[1] += (vy - self.player.vel[1]) * blend;
+            self.player.on_ground = false;
+        } else if in_water {
+            // Yüzme: yerçekimi uygulanmaz, hedef hıza yumuşak geçiş yapılır.
+            // `Space` yukarı çeker, bırakılınca oyuncu yavaşça batar. Eskiden
+            // yerçekimi aynen işliyordu ve oyuncu dibe batıp boğuluyordu.
+            let target = if k("Space") { SWIM_UP } else { -SWIM_SINK };
+            self.player.vel[1] += (target - self.player.vel[1]) * (dt * 8.0).min(1.0);
             self.player.on_ground = false;
         } else {
             if k("Space") && self.player.on_ground {
@@ -947,6 +993,7 @@ pub fn debug_state_json() -> String {
                 "\"selected\":{},\"held\":{},",
                 "\"pos\":[{:.2},{:.2},{:.2}],\"yaw\":{:.3},\"pitch\":{:.3},",
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
+                "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
                 "\"slots\":[{}]",
                 "}}"
             ),
@@ -974,6 +1021,9 @@ pub fn debug_state_json() -> String {
             g.player.flying,
             g.player.on_ground,
             g.render_dist,
+            g.hud.width,
+            g.hud.height,
+            g.player.feet_in_water(&g.world),
             slots.join(",")
         )
     })
@@ -1090,6 +1140,34 @@ pub fn debug_teleport(x: f64, y: f64, z: f64) {
     });
 }
 
+/// Oyuncuyu deniz seviyesinin altındaki bir sütuna ışınlar; yüzme testleri
+/// (H6) gerçek bir okyanus bulmak zorunda kalmasın. Uygun sütun bulunursa
+/// `true` döner.
+pub fn debug_teleport_to_water() -> bool {
+    with_game(|g| {
+        const GA: f64 = 2.399_963_23;
+        for i in 1..4000 {
+            let r = (i as f64).sqrt() * 9.0;
+            let x = (i as f64 * GA).cos() * r;
+            let z = (i as f64 * GA).sin() * r;
+            let (xi, zi) = (x.round() as i32, z.round() as i32);
+            if g.world.height_at(xi, zi) <= crate::world::SEA_LEVEL - 3 {
+                g.player.pos = [
+                    xi as f64 + 0.5,
+                    (crate::world::SEA_LEVEL - 1) as f64,
+                    zi as f64 + 0.5,
+                ];
+                g.player.vel = [0.0; 3];
+                g.player.flying = false;
+                g.force_restream = true;
+                return true;
+            }
+        }
+        false
+    })
+    .unwrap_or(false)
+}
+
 pub fn debug_add_item(id: u16, n: u32) {
     with_game(|g| {
         g.inv.add(id, n);
@@ -1104,11 +1182,21 @@ pub fn debug_count(id: u16) -> u32 {
 // Başlatma
 // -------------------------------------------------------------------
 
-fn resize_canvases(game: &Game) {
-    let (w, h) = (
-        game.window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(800.0),
-        game.window.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(600.0),
-    );
+/// Pencerenin CSS piksel cinsinden iç boyutu.
+fn window_size(window: &Window) -> (f64, f64) {
+    let w = window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(800.0);
+    let h = window.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(600.0);
+    (w, h)
+}
+
+/// Tuvalleri, GL görüntü alanını **ve HUD yerleşimini** pencere boyutuna getirir.
+///
+/// HUD'un `width`/`height` alanları burada güncellenmezse kısayol çubuğu,
+/// envanter paneli ve fare isabet testleri eski pencere boyutuna göre
+/// hesaplanır; `present()` de en-boy oranını aynı değerlerden aldığı için
+/// pencere yeniden boyutlandığında 3B görüntü esner.
+fn resize_canvases(game: &mut Game) {
+    let (w, h) = window_size(&game.window);
     for id in ["gl", "hud"] {
         if let Some(el) = game.document.get_element_by_id(id) {
             if let Some(c) = el.dyn_ref::<HtmlCanvasElement>() {
@@ -1118,6 +1206,7 @@ fn resize_canvases(game: &Game) {
         }
     }
     game.renderer.resize(w as i32, h as i32);
+    game.hud.resize(w, h);
 }
 
 /// Uygulamayı başlatır. `index.html` içinden `start()` olarak çağrılır
@@ -1205,7 +1294,7 @@ pub fn start() -> Result<(), JsValue> {
 
     game.rebuild_want(pcx, pcz);
     game.boot_total = game.want_data.len() + game.want_mesh.len();
-    resize_canvases(&game);
+    resize_canvases(&mut game);
 
     let game = Rc::new(RefCell::new(game));
     GAME.with(|slot| *slot.borrow_mut() = Some(game.clone()));
@@ -1263,9 +1352,7 @@ pub fn start() -> Result<(), JsValue> {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
             let mut game = g.borrow_mut();
-            resize_canvases(&game);
-            let (w, h) = (game.hud.width, game.hud.height);
-            game.hud.resize(w, h);
+            resize_canvases(&mut game);
         });
         window.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -1328,9 +1415,7 @@ pub fn start() -> Result<(), JsValue> {
     // --- ilk boyutlandırma ---
     {
         let mut g = game.borrow_mut();
-        let w = g.window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(800.0);
-        let h = g.window.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(600.0);
-        g.hud.resize(w, h);
+        resize_canvases(&mut g);
     }
 
     // --- oyun döngüsü ---

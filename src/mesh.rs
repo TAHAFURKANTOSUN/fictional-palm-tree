@@ -256,7 +256,11 @@ pub fn build_chunk_mesh(world: &World, cx: i32, cz: i32) -> Option<(MeshData, Me
             max_h = max_h.max(h);
         }
     }
-    let y_top = max_h.max(SEA_LEVEL).max(ch.edit_top);
+    // Üst sınır **arazi yüksekliği değil**, chunk'ın gerçek en yüksek dolu
+    // bloğudur: ağaç yaprakları zeminin 6–8 blok üstüne çıkar. Yalnızca arazi
+    // yüksekliğine bakılırsa yaprak tepeleri mesh dışında kalır ve görünmez
+    // (ama katı) bloklar oluşur.
+    let y_top = max_h.max(SEA_LEVEL).max(ch.content_top);
     let y0 = (min_h - 1).max(0);
     let y1 = (y_top + 2).min(WORLD_HEIGHT - 1);
 
@@ -402,6 +406,87 @@ mod tests {
         }
     }
 
+    /// H1 regresyonu: ağaç yaprakları mesh'in `y` aralığının üstünde kalmamalı.
+    /// Chunk'taki en yüksek dolu bloğun üst yüzü mutlaka mesh'e girmelidir.
+    #[test]
+    fn mesh_covers_the_highest_block_of_every_chunk() {
+        let w = test_world(20261012);
+        let mut checked = 0;
+        for cz in -1..=2 {
+            for cx in -1..=2 {
+                let ch = w.chunks.get(&ckey(cx, cz)).expect("chunk yok");
+
+                // Chunk'taki gerçek en yüksek dolu blok ve ağaç var mı?
+                let mut top = 0;
+                let mut has_leaves = false;
+                for y in 0..WORLD_HEIGHT {
+                    let base = CHUNK_AREA * y as usize;
+                    for &b in &ch.data[base..base + CHUNK_AREA] {
+                        if b != AIR {
+                            top = y;
+                        }
+                        if b == LEAVES {
+                            has_leaves = true;
+                        }
+                    }
+                }
+                if !has_leaves {
+                    continue; // ağaçsız chunk'ta eski formül de doğru çalışıyordu
+                }
+
+                let (solid, liquid) = build_chunk_mesh(&w, cx, cz).expect("mesh üretilemedi");
+                let max_y = solid
+                    .pos
+                    .chunks_exact(3)
+                    .chain(liquid.pos.chunks_exact(3))
+                    .map(|p| p[1])
+                    .fold(f32::MIN, f32::max);
+
+                assert!(
+                    max_y >= (top + 1) as f32 - 1e-3,
+                    "({cx},{cz}) ağaç tepesi mesh dışında: en yüksek blok y={top}, \
+                     mesh üst sınırı y={max_y}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "test dünyasında ağaçlı chunk bulunamadı");
+    }
+
+    /// H3'ün gerekçesi: chunk köşesindeki bir yüzün ambient occlusion'u
+    /// **çapraz** komşu chunk'ı da okur. Bu yüzden köşedeki bir blok değişince
+    /// çapraz chunk'ın mesh'i de tazelenmelidir (`app.rs` → `remesh_around`).
+    #[test]
+    fn corner_ao_depends_on_the_diagonal_neighbour_chunk() {
+        let mut w = test_world(20241012);
+        let h = w.height_at(0, 0);
+
+        // (0,0) chunk'ının köşesinde -X yüzü havaya bakan katı bir blok kur.
+        assert!(w.set_block_raw(0, h, 0, STONE));
+        assert!(w.set_block_raw(-1, h, 0, AIR));
+        assert!(w.set_block_raw(0, h + 1, 0, AIR));
+        // Çapraz chunk'ı (-1,-1) bu bloğun AO örneklerinden temizle.
+        assert!(w.set_block_raw(-1, h - 1, -1, AIR));
+        assert!(w.set_block_raw(-1, h + 1, -1, AIR));
+
+        let (before, _) = build_chunk_mesh(&w, 0, 0).expect("mesh üretilemedi");
+
+        // Yalnızca **çapraz** chunk'taki (-1,-1) blokları değiştir.
+        assert!(w.set_block_raw(-1, h - 1, -1, STONE));
+        assert!(w.set_block_raw(-1, h + 1, -1, STONE));
+
+        let (after, _) = build_chunk_mesh(&w, 0, 0).expect("mesh üretilemedi");
+
+        assert_ne!(
+            before.col, after.col,
+            "köşe AO'su çapraz komşuya bağlı olmalı: değişiklik mesh'e yansımadı"
+        );
+        assert_eq!(
+            before.pos, after.pos,
+            "yalnızca AO değişmeli; konumlar aynı kalmalı"
+        );
+    }
+
     #[test]
     fn reset_clears_buffers() {
         let mut m = MeshData::default();
@@ -438,7 +523,7 @@ mod tests {
 
     #[test]
     fn land_chunks_have_no_liquid_mesh() {
-        let mut w = test_world(20261012);
+        let w = test_world(20261012);
         // Deniz seviyesinin belirgin şekilde üstünde bir chunk bul.
         let mut land = None;
         for cz in -1..=2 {

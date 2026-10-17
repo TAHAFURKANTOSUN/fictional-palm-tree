@@ -211,6 +211,80 @@ async function main() {
   shot = await send('Page.captureScreenshot', { format: 'png' });
   fs.writeFileSync('_rs_game.png', Buffer.from(shot.result.data, 'base64'));
 
+  // ---- 16) H2: pencere yeniden boyutlanınca HUD ve en-boy oranı güncelleniyor mu? ----
+  {
+    const before = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+    await send('Emulation.setDeviceMetricsOverride', {
+      width: 900, height: 520, deviceScaleFactor: 1, mobile: false,
+    });
+    // Boyut değişimini deterministik tetikle (tarayıcı da aynı olayı gönderir).
+    await evalJs(`window.dispatchEvent(new Event('resize')); 1`);
+    await sleep(600);
+    const inner = await evalJs(`[window.innerWidth, window.innerHeight]`);
+    const after = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+    await send('Emulation.clearDeviceMetricsOverride');
+    await evalJs(`window.dispatchEvent(new Event('resize')); 1`);
+    await sleep(300);
+
+    out.resize = {
+      inner,
+      hud: [after.hudW, after.hudH],
+      before: [before.hudW, before.hudH],
+      ok: after.hudW === inner[0] && after.hudH === inner[1],
+    };
+    if (!out.resize.ok) {
+      problems.push(
+        `H2: HUD boyutu pencereye uymuyor — inner=${inner}, hud=[${after.hudW},${after.hudH}]`
+      );
+    }
+  }
+
+  // ---- 17) H6: suda yüzme (Space ile yüzeye çıkabilme) ----
+  {
+    await evalJs(`window.__vcRs.debug_set_mode(false); window.__vcRs.debug_set_health(20); 1`);
+    await sleep(1900);
+    const found = await evalJs(`window.__vcRs.debug_teleport_to_water()`);
+    await sleep(1800); // chunk akışı + yerleşme
+    const inWater = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+    const yBefore = inWater.pos[1];
+
+    // Space tuşunu basılı tut (gerçek klavye olayı).
+    await evalJs(
+      `window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', bubbles: true })); 1`
+    );
+    await sleep(1500);
+    const afterUp = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+    await evalJs(
+      `window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space', bubbles: true })); 1`
+    );
+    await sleep(400);
+
+    out.swim = {
+      found,
+      feetInWater: inWater.feetInWater,
+      yBefore,
+      yAfter: afterUp.pos[1],
+      rose: afterUp.pos[1] > yBefore + 0.5,
+    };
+    if (!found) {
+      problems.push('H6: okyanus sütunu bulunamadı');
+    } else if (!inWater.feetInWater) {
+      problems.push(`H6: ışınlanılan noktada ayaklar suda değil (y=${yBefore})`);
+    } else if (!out.swim.rose) {
+      problems.push(
+        `H6: suda Space ile yükselme yok — y ${yBefore} → ${afterUp.pos[1]}`
+      );
+    }
+
+    // Su bırakılınca batma hızı sınırlı olmalı (eskiden -70 m/s'ye kadar düşüyordu).
+    await sleep(900);
+    const sink = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+    out.swim.sinkDrop = Number((afterUp.pos[1] - sink.pos[1]).toFixed(2));
+    if (out.swim.sinkDrop > 4.0) {
+      problems.push(`H6: suda batma çok hızlı (0,9 sn'de ${out.swim.sinkDrop} blok)`);
+    }
+  }
+
   out.problems = problems;
   console.log(JSON.stringify(out, null, 2));
   process.exit(0);

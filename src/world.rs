@@ -33,8 +33,13 @@ pub struct Chunk {
     pub cz: i32,
     pub data: Vec<u8>,
     pub meshed: bool,
-    /// Oyuncunun koyduğu en yüksek blok — mesh'in y aralığını daraltmak için.
-    pub edit_top: i32,
+    /// Bu chunk'taki **en yüksek dolu blok** (arazi + su yüzeyi + ağaç + oyuncu
+    /// düzenlemesi). Mesh'in `y` aralığını daraltmak için kullanılır.
+    ///
+    /// Yalnızca arazi yüksekliğine bakmak yetmez: ağaç yaprakları zeminin 6–8
+    /// blok üstüne çıkar, bu yüzden ağaç tepeleri eskiden mesh dışında kalıp
+    /// görünmez oluyordu (bloklar katı kalıyordu).
+    pub content_top: i32,
     pub faces: u32,
 }
 
@@ -95,8 +100,8 @@ impl World {
                 None => return false,
             };
             ch.data[idx] = v;
-            if y > ch.edit_top {
-                ch.edit_top = y;
+            if y > ch.content_top {
+                ch.content_top = y;
             }
         }
 
@@ -110,6 +115,10 @@ impl World {
         let mut data = vec![AIR; CHUNK_AREA * WORLD_HEIGHT as usize];
         let x0 = cx * CHUNK_SIZE;
         let z0 = cz * CHUNK_SIZE;
+
+        // Chunk'taki gerçek en yüksek dolu blok — mesh'in y aralığı buna göre
+        // daraltılır. Ağaç yaprakları da dâhil edilmezse tepeleri görünmez olur.
+        let mut content_top = 0;
 
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
@@ -137,6 +146,11 @@ impl World {
                         data[base + CHUNK_AREA * y as usize] = SAND;
                     }
                 }
+
+                content_top = content_top.max(h);
+                if h < SEA_LEVEL {
+                    content_top = content_top.max(SEA_LEVEL);
+                }
             }
         }
 
@@ -153,24 +167,23 @@ impl World {
                 if h <= SEA_LEVEL + 1 {
                     continue;
                 }
-                place_tree(&mut data, x, h + 1, z, wx, wz);
+                content_top = content_top.max(place_tree(&mut data, x, h + 1, z, wx, wz));
             }
         }
 
-        let mut edit_top = 0;
         if let Some(ed) = self.edits.get(&key) {
             for (&idx, &v) in ed {
                 data[idx] = v;
                 let y = (idx / CHUNK_AREA) as i32;
-                if y > edit_top {
-                    edit_top = y;
+                if y > content_top {
+                    content_top = y;
                 }
             }
         }
 
         self.chunks.insert(
             key,
-            Chunk { cx, cz, data, meshed: false, edit_top, faces: 0 },
+            Chunk { cx, cz, data, meshed: false, content_top, faces: 0 },
         );
         key
     }
@@ -231,8 +244,12 @@ impl World {
 
 /// Ağacı **yalnızca bu chunk'a ait** hücrelere yazar (taşan kısımlar atlanır,
 /// komşu chunk kendi taramasında aynı ağacı üretir).
-fn place_tree(data: &mut [u8], lx: i32, ly: i32, lz: i32, wx: i32, wz: i32) {
+///
+/// Gerçekten yazılan en yüksek `y` değerini döndürür; `generate_chunk` bunu
+/// `content_top` olarak kullanır (aksi hâlde yaprak tepeleri mesh dışında kalır).
+fn place_tree(data: &mut [u8], lx: i32, ly: i32, lz: i32, wx: i32, wz: i32) -> i32 {
     let th = 4 + (hash3f(wx, 3, wz) * 3.0).floor() as i32;
+    let mut written_top = 0;
 
     for i in 0..th {
         let y = ly + i;
@@ -243,6 +260,7 @@ fn place_tree(data: &mut [u8], lx: i32, ly: i32, lz: i32, wx: i32, wz: i32) {
             continue;
         }
         data[li(lx as usize, lz as usize, y as usize)] = LOG;
+        written_top = written_top.max(y);
     }
 
     let top = ly + th;
@@ -268,10 +286,13 @@ fn place_tree(data: &mut [u8], lx: i32, ly: i32, lz: i32, wx: i32, wz: i32) {
                 let idx = li(x as usize, z as usize, y as usize);
                 if data[idx] == AIR {
                     data[idx] = LEAVES;
+                    written_top = written_top.max(y);
                 }
             }
         }
     }
+
+    written_top
 }
 
 #[cfg(test)]

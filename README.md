@@ -106,7 +106,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | <kbd>E</kbd> | Envanter & çalışma tezgahı |
 | <kbd>F</kbd> veya <kbd>Space</kbd> ×2 | Uçuş (yalnızca Yaratıcı mod) |
 | <kbd>G</kbd> | Yaratıcı ↔ Hayatta Kalma |
-| <kbd>Space</kbd> / <kbd>Shift</kbd> | Zıpla / eğil (uçuşta yukarı / aşağı) |
+| <kbd>Space</kbd> / <kbd>Shift</kbd> | Zıpla / eğil (uçuşta yukarı / aşağı, suda yüz) |
 | <kbd>Ctrl</kbd> | Koş / hızlı uç |
 | <kbd>1</kbd>–<kbd>9</kbd>, fare tekerleği | Yuva seç |
 | <kbd>[</kbd> <kbd>]</kbd> | Görüş mesafesi (3–16 bölge) |
@@ -122,6 +122,9 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
   yüzme ve blok kırma yorgunluk üretir; yorgunluk açlığa dönüşür. Açlık 0 olunca
   yıldız açlığı başlar; tokken can yenilenir. 3 bloktan yüksek düşüşler hasar
   verir, su altında 15 saniye sonra boğulmaya başlarsın.
+- **Yüzme** — suda yerçekimi yerine yumuşak batma işler; <kbd>Space</kbd> ile
+  yukarı yüzüp yüzeye çıkabilirsin. Yatay hız suda düşer (koşarken 4,0 / normal
+  2,6 blok/sn). Böylece okyanusa düşünce dibe çakılıp boğulmazsın.
 - **Yemek** — yapraklar %14 olasılıkla 🍎 **elma** düşürür; sağ tıkla ye
   (+6 açlık).
 - **Yaratıcı mod** (<kbd>G</kbd>) — can/açlık devre dışı, uçuş açık, envanter
@@ -235,7 +238,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 116 test
+cargo test --lib          # 118 test
 ```
 
 <details>
@@ -249,6 +252,8 @@ cargo test --lib          # 116 test
 - Oyuncu düzenlemelerinin kalıcılığı
 - ±1.000.000 blok uzakta arazi üretimi
 - Mesh öznitelik dengesi, indeks sınırları, daraltılmış y aralığı, kapsayıcı küre
+- Mesh'in chunk'taki **en yüksek bloğu** (ağaç tepeleri) kapsaması
+- Köşe AO'sunun **çapraz komşu chunk'a** bağlı olması
 - Atlas döşemeleri
 - DDA ışın izleme (normal yönü dâhil)
 - AABB çarpışması ve tünelleme engeli
@@ -276,6 +281,8 @@ oyunu Chrome DevTools Protocol üzerinden sürer:
 - Hayatta kalmaya dönüşte envanterin geri gelmesi
 - Koyma tüketimi ve yemek yeme
 - Hayatta kalma modunda uçuşun engellenmesi
+- Pencere yeniden boyutlandığında HUD'un ve en-boy oranının güncellenmesi
+- Okyanusta <kbd>Space</kbd> ile yüzeye çıkabilme ve batma hızının sınırlı olması
 - ~120 FPS
 - (50000, −50000) noktasına ışınlanmada bellek sınırının korunması
 

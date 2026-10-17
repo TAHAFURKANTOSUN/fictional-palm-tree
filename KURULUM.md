@@ -153,7 +153,7 @@ Her adımın başarılı sonucu şöyle görünür:
 
 | Adım | Başarılı çıktı |
 |---|---|
-| 1 | `test result: ok. 116 passed` |
+| 1 | `test result: ok. 118 passed` |
 | 2 | `Finished ... release ... [optimized]` satırı |
 | 3–4 | Çıktı yok; `pkg\` ve `pkg-nomodules\` içinde `.js` + `_bg.wasm` dosyaları oluşur |
 | 5 | `Yazıldı: ...voxelcraft-rs.html (≈433 KB, ...)` |
