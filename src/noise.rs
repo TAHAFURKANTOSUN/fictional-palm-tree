@@ -92,10 +92,10 @@ impl Perlin {
         let u = fade(xf);
         let v = fade(yf);
 
-        let aa = self.perm[self.perm[xi] as usize + yi] as u8;
-        let ab = self.perm[self.perm[xi] as usize + yi + 1] as u8;
-        let ba = self.perm[self.perm[xi + 1] as usize + yi] as u8;
-        let bb = self.perm[self.perm[xi + 1] as usize + yi + 1] as u8;
+        let aa = self.perm[self.perm[xi] as usize + yi];
+        let ab = self.perm[self.perm[xi] as usize + yi + 1];
+        let ba = self.perm[self.perm[xi + 1] as usize + yi];
+        let bb = self.perm[self.perm[xi + 1] as usize + yi + 1];
 
         let x1 = lerp(grad(aa, xf, yf), grad(ba, xf - 1.0, yf), u);
         let x2 = lerp(grad(ab, xf, yf - 1.0), grad(bb, xf - 1.0, yf - 1.0), u);

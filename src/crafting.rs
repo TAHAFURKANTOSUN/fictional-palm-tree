@@ -4,7 +4,7 @@
 //! konursa konsun, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
 
 use crate::blocks::{CRAFT_TABLE, DIRT, GRASS, LEAVES, LOG, PLANKS, SAND, STICK, STONE};
-use crate::inventory::{Inventory, Stack};
+use crate::inventory::{Inventory, Stack, MAX_STACK};
 
 pub type Grid = [Option<Stack>; 9];
 
@@ -116,7 +116,7 @@ fn grid_bounds(grid: &Grid) -> Option<Bounds> {
     for y in 0..h {
         let mut row = Vec::with_capacity(w);
         for x in 0..w {
-            let idx = ((min_y as usize + y) * 3 + (min_x as usize + x)) as usize;
+            let idx = (min_y as usize + y) * 3 + (min_x as usize + x);
             row.push(grid[idx].map(|s| s.id).unwrap_or(0));
         }
         cells.push(row);
@@ -241,6 +241,28 @@ pub fn auto_fill(grid: &mut Grid, inv: &mut Inventory, rec: &Recipe) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Sonuç yuvasına tıklama: ürünü fareyle taşınan yığına (`held`) ekler.
+///
+/// Ürün elde **tutulamıyorsa** (elde başka bir eşya var ya da yığın taşar)
+/// hiçbir şey yapılmaz ve `false` döner. Aksi hâlde malzemeler harcanıp ürün
+/// kaybolurdu.
+pub fn take_result_into(grid: &mut Grid, held: &mut Option<Stack>) -> bool {
+    let Some((id, n)) = craft_output(grid) else { return false };
+    let fits = match held {
+        None => true,
+        Some(h) => h.id == id && h.count as u32 + n as u32 <= MAX_STACK as u32,
+    };
+    if !fits {
+        return false;
+    }
+    take_result(grid);
+    match held {
+        Some(h) => h.count += n,
+        None => *held = Some(Stack::new(id, n)),
+    }
+    true
 }
 
 /// Sonuç yuvasından bir üretim alır; ızgaradaki her malzemeden bir adet eksiltir.
@@ -370,6 +392,39 @@ mod tests {
         let mut g = empty();
         // Tezgah için 4 tahta gerekir, envanter boş.
         assert_eq!(auto_fill(&mut g, &mut inv, &RECIPES[2]), Err(PLANKS as u16));
+    }
+
+    #[test]
+    fn result_is_not_lost_when_hand_holds_something_else() {
+        let mut g = empty();
+        put(&mut g, 0, LOG as u16);
+        let mut held = Some(Stack::new(STONE as u16, 5));
+        assert!(!take_result_into(&mut g, &mut held), "elde başka eşya varken alınmamalı");
+        assert_eq!(g[0], Some(Stack::new(LOG as u16, 1)), "malzeme harcanmamalı");
+        assert_eq!(held, Some(Stack::new(STONE as u16, 5)));
+    }
+
+    #[test]
+    fn result_is_not_lost_when_held_stack_would_overflow() {
+        let mut g = empty();
+        put(&mut g, 0, LOG as u16);
+        let mut held = Some(Stack::new(PLANKS as u16, MAX_STACK - 2)); // +4 sığmaz
+        assert!(!take_result_into(&mut g, &mut held));
+        assert!(g[0].is_some(), "malzeme harcanmamalı");
+        assert_eq!(held.unwrap().count, MAX_STACK - 2);
+    }
+
+    #[test]
+    fn result_stacks_onto_matching_held_items() {
+        let mut g = empty();
+        put(&mut g, 4, LOG as u16);
+        let mut held = None;
+        assert!(take_result_into(&mut g, &mut held));
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, 4)));
+        assert!(g[4].is_none());
+        put(&mut g, 4, LOG as u16);
+        assert!(take_result_into(&mut g, &mut held));
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, 8)));
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub struct Hit {
 
 /// `(ox,oy,oz)` noktasından `(dx,dy,dz)` yönünde ışın atar.
 /// Su ve hava saydamdır; `max_dist` aşılırsa `None` döner.
+#[allow(clippy::too_many_arguments)]
 pub fn raycast_voxel(
     world: &World,
     ox: f64,

@@ -1,6 +1,6 @@
 //! WebGL2 çizici.
 //!
-//! Chunk başına tek bir interleaved vertex buffer (konum + normal + uv + renk)
+//! Chunk başına tek bir interleaved vertex buffer (konum + uv + renk)
 //! ve iki katman (katı / sıvı) tutulur. Kare başına önce görüş konisi (frustum)
 //! elemesi yapılır, sonra katı ve sıvı katmanlar sırayla çizilir.
 
@@ -14,17 +14,14 @@ use web_sys::{
 
 use crate::atlas::{ATLAS_H, ATLAS_W};
 use crate::mat4::{self, Frustum};
-use crate::mesh::MeshData;
+use crate::mesh::{MeshData, FLOATS_PER_VERTEX};
 
-/// Vertex başına `f32` sayısı: konum(3) + normal(3) + uv(2) + renk(3).
-const FLOATS_PER_VERTEX: usize = 11;
 const STRIDE: i32 = (FLOATS_PER_VERTEX * 4) as i32;
 
 const MAIN_VS: &str = r#"#version 300 es
 layout(location = 0) in vec3 a_pos;
-layout(location = 1) in vec3 a_nor;
-layout(location = 2) in vec2 a_uv;
-layout(location = 3) in vec3 a_col;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in vec3 a_col;
 uniform mat4 u_viewProj;
 uniform vec3 u_camPos;
 out vec2 v_uv;
@@ -126,6 +123,8 @@ struct GpuLayer {
     vbo: WebGlBuffer,
     ibo: WebGlBuffer,
     count: i32,
+    /// `UNSIGNED_SHORT` veya `UNSIGNED_INT`.
+    index_type: u32,
 }
 
 struct GpuChunk {
@@ -160,6 +159,9 @@ pub struct Renderer {
     s_time: Option<WebGlUniformLocation>,
 
     chunks: HashMap<u64, GpuChunk>,
+    /// Kare başına görünür chunk listesi — her karede yeniden ayrılmasın diye
+    /// alan olarak tutulur.
+    visible: Vec<u64>,
     pub fog_color: [f32; 3],
     pub sky_top: [f32; 3],
     pub sky_horizon: [f32; 3],
@@ -202,17 +204,6 @@ fn link(gl: &GL, vs_src: &str, fs_src: &str) -> Result<WebGlProgram, String> {
     Ok(prog)
 }
 
-fn interleave(m: &MeshData) -> Vec<f32> {
-    let n = m.pos.len() / 3;
-    let mut v = Vec::with_capacity(n * FLOATS_PER_VERTEX);
-    for i in 0..n {
-        v.extend_from_slice(&m.pos[i * 3..i * 3 + 3]);
-        v.extend_from_slice(&m.nor[i * 3..i * 3 + 3]);
-        v.extend_from_slice(&m.uv[i * 2..i * 2 + 2]);
-        v.extend_from_slice(&m.col[i * 3..i * 3 + 3]);
-    }
-    v
-}
 
 impl Renderer {
     pub fn new(canvas: &HtmlCanvasElement) -> Result<Self, String> {
@@ -263,6 +254,11 @@ impl Renderer {
         let u = |name: &str| gl.get_uniform_location(&prog, name);
         let su = |name: &str| gl.get_uniform_location(&sky_prog, name);
 
+        // Doku birimi hiç değişmez: örnekleyici bir kez bağlanır.
+        gl.use_program(Some(&prog));
+        gl.uniform1i(gl.get_uniform_location(&prog, "u_atlas").as_ref(), 0);
+        gl.use_program(None);
+
         let r = Self {
             u_view_proj: u("u_viewProj"),
             u_cam_pos: u("u_camPos"),
@@ -287,6 +283,7 @@ impl Renderer {
             atlas,
             sky_vao,
             chunks: HashMap::new(),
+            visible: Vec::new(),
             fog_color: [0.81, 0.90, 0.98],
             sky_top: [0.35, 0.65, 0.94],
             sky_horizon: [0.81, 0.90, 0.98],
@@ -307,30 +304,39 @@ impl Renderer {
 
         gl.bind_vertex_array(Some(&vao));
 
+        // Köşeler mesh tarafından zaten interleaved yazıldı: tek kopya.
         gl.bind_buffer(GL::ARRAY_BUFFER, Some(&vbo));
-        let verts = interleave(m);
-        let varr = js_sys::Float32Array::from(&verts[..]);
+        let varr = js_sys::Float32Array::from(&m.verts[..]);
         gl.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &varr, GL::STATIC_DRAW);
 
+        // Neredeyse tüm chunk'lar 65 536 köşenin altında kalır: 16 bit indeks
+        // indeks belleğini yarıya indirir. Sınırı aşan (patolojik) chunk'lar
+        // için 32 bit'e düşülür.
         gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&ibo));
-        let iarr = js_sys::Uint32Array::from(&m.idx[..]);
-        gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &iarr, GL::STATIC_DRAW);
+        let index_type = if m.vertex_count() <= u16::MAX as u32 + 1 {
+            let idx16: Vec<u16> = m.idx.iter().map(|&i| i as u16).collect();
+            let iarr = js_sys::Uint16Array::from(&idx16[..]);
+            gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &iarr, GL::STATIC_DRAW);
+            GL::UNSIGNED_SHORT
+        } else {
+            let iarr = js_sys::Uint32Array::from(&m.idx[..]);
+            gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &iarr, GL::STATIC_DRAW);
+            GL::UNSIGNED_INT
+        };
 
         let stride = STRIDE;
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_with_i32(0, 3, GL::FLOAT, false, stride, 0);
         gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_with_i32(1, 3, GL::FLOAT, false, stride, 12);
+        gl.vertex_attrib_pointer_with_i32(1, 2, GL::FLOAT, false, stride, 12);
         gl.enable_vertex_attrib_array(2);
-        gl.vertex_attrib_pointer_with_i32(2, 2, GL::FLOAT, false, stride, 24);
-        gl.enable_vertex_attrib_array(3);
-        gl.vertex_attrib_pointer_with_i32(3, 3, GL::FLOAT, false, stride, 32);
+        gl.vertex_attrib_pointer_with_i32(2, 3, GL::FLOAT, false, stride, 20);
 
         gl.bind_vertex_array(None);
         gl.bind_buffer(GL::ARRAY_BUFFER, None);
         gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, None);
 
-        Some(GpuLayer { vao, vbo, ibo, count: m.idx.len() as i32 })
+        Some(GpuLayer { vao, vbo, ibo, count: m.idx.len() as i32, index_type })
     }
 
     fn destroy_layer(&self, l: &GpuLayer) {
@@ -458,15 +464,16 @@ impl Renderer {
         gl.uniform1f(self.u_fog_far.as_ref(), fog_far);
         gl.active_texture(GL::TEXTURE0);
         gl.bind_texture(GL::TEXTURE_2D, Some(&self.atlas));
-        gl.uniform1i(gl.get_uniform_location(&self.prog, "u_atlas").as_ref(), 0);
 
         // Görüş konisi dışındaki chunk'lar hiç çizilmez.
-        let visible: Vec<u64> = self
-            .chunks
-            .iter()
-            .filter(|(_, c)| frustum.sphere_visible(c.center, c.radius))
-            .map(|(k, _)| *k)
-            .collect();
+        let mut visible = std::mem::take(&mut self.visible);
+        visible.clear();
+        visible.extend(
+            self.chunks
+                .iter()
+                .filter(|(_, c)| frustum.sphere_visible(c.center, c.radius))
+                .map(|(k, _)| *k),
+        );
 
         let mut draws = 0u32;
         let mut tris = 0u32;
@@ -478,7 +485,7 @@ impl Renderer {
         for key in &visible {
             if let Some(l) = &self.chunks[key].solid {
                 gl.bind_vertex_array(Some(&l.vao));
-                gl.draw_elements_with_i32(GL::TRIANGLES, l.count, GL::UNSIGNED_INT, 0);
+                gl.draw_elements_with_i32(GL::TRIANGLES, l.count, l.index_type, 0);
                 draws += 1;
                 tris += l.count as u32 / 3;
             }
@@ -492,7 +499,7 @@ impl Renderer {
         for key in &visible {
             if let Some(l) = &self.chunks[key].liquid {
                 gl.bind_vertex_array(Some(&l.vao));
-                gl.draw_elements_with_i32(GL::TRIANGLES, l.count, GL::UNSIGNED_INT, 0);
+                gl.draw_elements_with_i32(GL::TRIANGLES, l.count, l.index_type, 0);
                 draws += 1;
                 tris += l.count as u32 / 3;
             }
@@ -500,6 +507,7 @@ impl Renderer {
         gl.disable(GL::BLEND);
         gl.bind_vertex_array(None);
 
+        self.visible = visible;
         self.stats_draws = draws;
         self.stats_tris = tris;
     }

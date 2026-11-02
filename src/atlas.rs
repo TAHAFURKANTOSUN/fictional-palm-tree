@@ -281,9 +281,10 @@ mod tests {
     fn grass_side_has_green_top_and_brown_bottom() {
         let a = build_atlas();
         let x_off = crate::blocks::T_GRASS_SIDE as usize * TILE as usize;
-        let top = (0 * ATLAS_W + x_off + 5) * 4;
-        let bottom = (15 * ATLAS_W + x_off + 5) * 4;
-        assert!(a[top + 1] > a[top + 0], "çim yanının üstü yeşil olmalı");
-        assert!(a[bottom + 0] > a[bottom + 1], "çim yanının altı kahverengi olmalı");
+        // Piksel (x=5, y) → RGBA başlangıç indeksi. [R, G] karşılaştırılır.
+        let px = |y: usize| (y * ATLAS_W + x_off + 5) * 4;
+        let (top, bottom) = (px(0), px(15));
+        assert!(a[top + 1] > a[top], "çim yanının üstü yeşil olmalı");
+        assert!(a[bottom] > a[bottom + 1], "çim yanının altı kahverengi olmalı");
     }
 }

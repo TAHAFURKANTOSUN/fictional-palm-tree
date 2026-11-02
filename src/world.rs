@@ -40,6 +40,14 @@ pub struct Chunk {
     /// blok üstüne çıkar, bu yüzden ağaç tepeleri eskiden mesh dışında kalıp
     /// görünmez oluyordu (bloklar katı kalıyordu).
     pub content_top: i32,
+    /// Sütun başına arazi yüksekliği (`x + 16*z`). Üretim sırasında zaten
+    /// hesaplanır; mesh kurulumu her seferinde gürültüyü yeniden örneklemek
+    /// yerine bunu okur.
+    pub heights: Box<[u8; CHUNK_AREA]>,
+    /// Bu chunk'taki **en alçak oyuncu düzenlemesi** (`WORLD_HEIGHT` = yok).
+    /// Kazılan çukurlar arazi yüzeyinin altını açığa çıkarır; mesh'in alt
+    /// sınırı buna göre genişletilir.
+    pub min_edit_y: i32,
     pub faces: u32,
 }
 
@@ -88,7 +96,7 @@ impl World {
 
     /// Bloğu yazar ve değişikliği kalıcı olarak kaydeder.
     pub fn set_block_raw(&mut self, x: i32, y: i32, z: i32, v: u8) -> bool {
-        if y < 0 || y >= WORLD_HEIGHT {
+        if !(0..WORLD_HEIGHT).contains(&y) {
             return false;
         }
         let key = ckey(x >> 4, z >> 4);
@@ -100,9 +108,8 @@ impl World {
                 None => return false,
             };
             ch.data[idx] = v;
-            if y > ch.content_top {
-                ch.content_top = y;
-            }
+            ch.content_top = ch.content_top.max(y);
+            ch.min_edit_y = ch.min_edit_y.min(y);
         }
 
         self.edits.entry(key).or_default().insert(idx, v);
@@ -119,11 +126,13 @@ impl World {
         // Chunk'taki gerçek en yüksek dolu blok — mesh'in y aralığı buna göre
         // daraltılır. Ağaç yaprakları da dâhil edilmezse tepeleri görünmez olur.
         let mut content_top = 0;
+        let mut heights = Box::new([0u8; CHUNK_AREA]);
 
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let h = self.height_at(x0 + x, z0 + z);
                 let base = x as usize + CHUNK_SIZE as usize * z as usize;
+                heights[base] = h as u8;
 
                 for y in 0..=h {
                     let b = if y == 0 {
@@ -163,7 +172,11 @@ impl World {
                 if hash3f(wx, 7, wz) <= 0.9935 {
                     continue;
                 }
-                let h = self.height_at(wx, wz);
+                let h = if (0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&z) {
+                    heights[(x + CHUNK_SIZE * z) as usize] as i32
+                } else {
+                    self.height_at(wx, wz)
+                };
                 if h <= SEA_LEVEL + 1 {
                     continue;
                 }
@@ -171,19 +184,19 @@ impl World {
             }
         }
 
+        let mut min_edit_y = WORLD_HEIGHT;
         if let Some(ed) = self.edits.get(&key) {
             for (&idx, &v) in ed {
                 data[idx] = v;
                 let y = (idx / CHUNK_AREA) as i32;
-                if y > content_top {
-                    content_top = y;
-                }
+                content_top = content_top.max(y);
+                min_edit_y = min_edit_y.min(y);
             }
         }
 
         self.chunks.insert(
             key,
-            Chunk { cx, cz, data, meshed: false, content_top, faces: 0 },
+            Chunk { cx, cz, data, meshed: false, content_top, heights, min_edit_y, faces: 0 },
         );
         key
     }
@@ -256,7 +269,7 @@ fn place_tree(data: &mut [u8], lx: i32, ly: i32, lz: i32, wx: i32, wz: i32) -> i
         if !(0..CHUNK_SIZE).contains(&lx) || !(0..CHUNK_SIZE).contains(&lz) {
             continue;
         }
-        if y < 0 || y >= WORLD_HEIGHT {
+        if !(0..WORLD_HEIGHT).contains(&y) {
             continue;
         }
         data[li(lx as usize, lz as usize, y as usize)] = LOG;
@@ -280,7 +293,7 @@ fn place_tree(data: &mut [u8], lx: i32, ly: i32, lz: i32, wx: i32, wz: i32) -> i
                 if !(0..CHUNK_SIZE).contains(&x) || !(0..CHUNK_SIZE).contains(&z) {
                     continue;
                 }
-                if y < 0 || y >= WORLD_HEIGHT {
+                if !(0..WORLD_HEIGHT).contains(&y) {
                     continue;
                 }
                 let idx = li(x as usize, z as usize, y as usize);
@@ -434,6 +447,34 @@ mod tests {
         w.generate_chunk(3000 >> 4, 3000 >> 4);
 
         assert_eq!(w.get_block(3000, h + 1, 3000), BRICK, "oyuncu değişikliği kayboldu");
+    }
+
+    #[test]
+    fn cached_heights_match_noise() {
+        let mut w = world();
+        w.generate_chunk(-3, 5);
+        let ch = w.chunks.get(&ckey(-3, 5)).unwrap();
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                assert_eq!(
+                    ch.heights[(x + CHUNK_SIZE * z) as usize] as i32,
+                    w.height_at(-3 * CHUNK_SIZE + x, 5 * CHUNK_SIZE + z)
+                );
+            }
+        }
+        assert_eq!(ch.min_edit_y, WORLD_HEIGHT, "düzenleme yokken min_edit_y boş olmalı");
+    }
+
+    #[test]
+    fn lowest_edit_is_tracked_across_regeneration() {
+        let mut w = world();
+        w.generate_chunk(0, 0);
+        assert!(w.set_block_raw(5, 30, 5, AIR));
+        assert!(w.set_block_raw(5, 7, 5, AIR));
+        assert_eq!(w.chunks[&ckey(0, 0)].min_edit_y, 7);
+        w.unload_chunk(ckey(0, 0));
+        w.generate_chunk(0, 0);
+        assert_eq!(w.chunks[&ckey(0, 0)].min_edit_y, 7, "yeniden üretimde kayboldu");
     }
 
     #[test]

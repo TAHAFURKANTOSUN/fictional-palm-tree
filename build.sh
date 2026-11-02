@@ -43,5 +43,7 @@ echo "==> Hazır: $OUT_DIR/voxelcraft_rs_bg.wasm ($(du -h "$OUT_DIR/voxelcraft_r
 if [ "${1:-}" = "serve" ]; then
   PORT="${2:-8080}"
   echo "==> http://localhost:$PORT üzerinde sunuluyor (Ctrl+C ile durdurun)"
-  python -m http.server "$PORT"
+  # Linux/macOS'ta genellikle yalnızca `python3` vardır; Windows'ta `python`.
+  PY="$(command -v python3 || command -v python)"
+  "$PY" -m http.server "$PORT"
 fi

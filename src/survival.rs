@@ -25,7 +25,7 @@ const INVULN_TIME: f64 = 0.5;
 /// Doğuştan sonra verilen dokunulmazlık.
 const SPAWN_INVULN: f64 = 2.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum GameMode {
     Survival,
     Creative,

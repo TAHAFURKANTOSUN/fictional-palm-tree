@@ -243,6 +243,14 @@ async function main() {
   {
     await evalJs(`window.__vcRs.debug_set_mode(false); window.__vcRs.debug_set_health(20); 1`);
     await sleep(1900);
+    // 13. adımdaki uzak ışınlanma (y=90) hayatta kalma modunda ölümcül düşüşe
+    // yol açar. Yavaş (yazılımsal) çizimde oyun zamanı da yavaşlar ve yeniden
+    // doğma bu adımın ortasına denk gelip oyuncuyu sudan çıkarabiliyordu.
+    // Önce yeniden doğmayı bekle.
+    for (let i = 0; i < 40; i++) {
+      if (!JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).dead) break;
+      await sleep(250);
+    }
     const found = await evalJs(`window.__vcRs.debug_teleport_to_water()`);
     await sleep(1800); // chunk akışı + yerleşme
     const inWater = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));

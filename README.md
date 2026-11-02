@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-116%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-125%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -48,7 +48,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - 🛠️ **3×3 craft sistemi** — konumdan bağımsız şekilli ve şekilsiz tarifler.
 - ⚡ **Yüksek performans** — görüş konisi (frustum) ayıklama, ~120 FPS.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
-- ✅ **116 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **125 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -238,7 +238,8 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 118 test
+cargo test --lib          # 125 test
+cargo run --release --example bench   # chunk üretimi / mesh kurulumu ölçümü
 ```
 
 <details>
@@ -253,12 +254,14 @@ cargo test --lib          # 118 test
 - ±1.000.000 blok uzakta arazi üretimi
 - Mesh öznitelik dengesi, indeks sınırları, daraltılmış y aralığı, kapsayıcı küre
 - Mesh'in chunk'taki **en yüksek bloğu** (ağaç tepeleri) kapsaması
+- Kazılan derin kuyuların taban/duvar yüzlerinin mesh'e girmesi
+- Mesh tamponlarının yeniden kullanımında birebir aynı çıktı
 - Köşe AO'sunun **çapraz komşu chunk'a** bağlı olması
 - Atlas döşemeleri
 - DDA ışın izleme (normal yönü dâhil)
 - AABB çarpışması ve tünelleme engeli
 - Yığınlama (stacking)
-- Craft eşleştirme (offset, fazla malzeme, zincir üretim)
+- Craft eşleştirme (offset, fazla malzeme, zincir üretim) ve elde tutulamayan ürünün kaybolmaması
 - Açlık / can / yorgunluk / boğulma / düşme matematiği
 - Mod geçişinde envanterin korunması
 

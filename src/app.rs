@@ -3,7 +3,6 @@
 //! Yalnızca `wasm32` hedefinde derlenir.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
@@ -15,7 +14,7 @@ use crate::crafting::{self, Grid};
 use crate::gl::Renderer;
 use crate::hud::{DebugInfo, Hud};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
-use crate::mesh;
+use crate::mesh::{self, MeshData};
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
 use crate::survival::{Event, GameMode, Survival, TickInput};
@@ -36,6 +35,41 @@ const SWIM_UP: f64 = 3.6;
 /// Hiçbir tuşa basılmazken hedeflenen dikey hız (yavaş batma).
 const SWIM_SINK: f64 = 1.5;
 
+/// Oyunun dinlediği tuşlar. Basılı tuşlar `String` anahtarlı bir `HashMap`
+/// yerine tek bir bit maskesinde tutulur: kare başına onlarca dize
+/// karşılaştırması / ayırması yerine tek bit testi. Her **fiziksel** tuşun
+/// kendi biti vardır; böylece `W` ile `↑` aynı anda basılıyken birini
+/// bırakmak hareketi durdurmaz.
+mod keys {
+    pub const FORWARD: u32 = 1 << 0 | 1 << 1; // KeyW | ArrowUp
+    pub const BACK: u32 = 1 << 2 | 1 << 3; // KeyS | ArrowDown
+    pub const LEFT: u32 = 1 << 4 | 1 << 5; // KeyA | ArrowLeft
+    pub const RIGHT: u32 = 1 << 6 | 1 << 7; // KeyD | ArrowRight
+    pub const JUMP: u32 = 1 << 8; // Space
+    pub const SNEAK: u32 = 1 << 9 | 1 << 10; // ShiftLeft | ShiftRight
+    pub const SPRINT: u32 = 1 << 11 | 1 << 12; // ControlLeft | ControlRight
+
+    /// `KeyboardEvent.code` → tuşun biti (dinlenmeyen tuşlar için `0`).
+    pub fn bit(code: &str) -> u32 {
+        match code {
+            "KeyW" => 1 << 0,
+            "ArrowUp" => 1 << 1,
+            "KeyS" => 1 << 2,
+            "ArrowDown" => 1 << 3,
+            "KeyA" => 1 << 4,
+            "ArrowLeft" => 1 << 5,
+            "KeyD" => 1 << 6,
+            "ArrowRight" => 1 << 7,
+            "Space" => 1 << 8,
+            "ShiftLeft" => 1 << 9,
+            "ShiftRight" => 1 << 10,
+            "ControlLeft" => 1 << 11,
+            "ControlRight" => 1 << 12,
+            _ => 0,
+        }
+    }
+}
+
 struct Game {
     world: World,
     player: Player,
@@ -49,7 +83,8 @@ struct Game {
     window: Window,
     document: Document,
 
-    keys: HashMap<String, bool>,
+    /// Basılı tuşların bit maskesi (bkz. `keys` modülü).
+    keys: u32,
     mouse: (f64, f64),
     pointer_locked: bool,
     dragging: bool,
@@ -69,6 +104,10 @@ struct Game {
     force_restream: bool,
     last_pcx: i32,
     last_pcz: i32,
+
+    /// Mesh kurulumunda yeniden kullanılan tamponlar (kare başına ayırma yok).
+    mesh_solid: MeshData,
+    mesh_liquid: MeshData,
 
     want_data: Vec<(i32, i32, i32)>,
     want_mesh: Vec<(i32, i32, i32)>,
@@ -158,6 +197,27 @@ impl Game {
         }
     }
 
+    /// Chunk'ın mesh'ini kurup GPU'ya yükler. 8 komşusu hazır değilse
+    /// `false` döner. Tamponlar `Game` üzerinde tutulur ve yeniden kullanılır.
+    fn remesh(&mut self, cx: i32, cz: i32) -> bool {
+        let key = ckey(cx, cz);
+        if !mesh::build_chunk_mesh_into(
+            &self.world,
+            cx,
+            cz,
+            &mut self.mesh_solid,
+            &mut self.mesh_liquid,
+        ) {
+            return false;
+        }
+        if let Some(ch) = self.world.chunks.get_mut(&key) {
+            ch.meshed = true;
+            ch.faces = self.mesh_solid.face_count() + self.mesh_liquid.face_count();
+        }
+        self.renderer.upload_chunk(key, &self.mesh_solid, &self.mesh_liquid);
+        true
+    }
+
     /// Kare başına sınırlı iş: veri üretimi ve mesh kurulumu.
     fn update_chunks(&mut self) {
         let pcx = (self.player.pos[0] / CHUNK_SIZE as f64).floor() as i32;
@@ -198,16 +258,8 @@ impl Game {
                 .get(&key)
                 .map(|c| !c.meshed)
                 .unwrap_or(false);
-            if needs_mesh {
-                if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, cx, cz) {
-                    if let Some(ch) = self.world.chunks.get_mut(&key) {
-                        ch.meshed = true;
-                        ch.faces = solid.face_count() + liquid.face_count();
-                    }
-                    self.renderer.upload_chunk(key, &solid, &liquid);
-                } else {
-                    return; // komşu eksik: sonraki karede tekrar dene
-                }
+            if needs_mesh && !self.remesh(cx, cz) {
+                return; // komşu eksik: sonraki karede tekrar dene
             }
             self.mesh_idx += 1;
             it += 1;
@@ -230,13 +282,7 @@ impl Game {
             let (cx, cz, _) = self.want_mesh[self.mesh_idx];
             let key = ckey(cx, cz);
             if self.world.chunks.get(&key).map(|c| !c.meshed).unwrap_or(false) {
-                if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, cx, cz) {
-                    if let Some(ch) = self.world.chunks.get_mut(&key) {
-                        ch.meshed = true;
-                        ch.faces = solid.face_count() + liquid.face_count();
-                    }
-                    self.renderer.upload_chunk(key, &solid, &liquid);
-                }
+                self.remesh(cx, cz);
             }
             self.mesh_idx += 1;
             self.boot_done += 1;
@@ -332,7 +378,7 @@ impl Game {
         let tx = hit.x + hit.nx;
         let ty = hit.y + hit.ny;
         let tz = hit.z + hit.nz;
-        if ty < 0 || ty >= crate::world::WORLD_HEIGHT {
+        if !(0..crate::world::WORLD_HEIGHT).contains(&ty) {
             return;
         }
         let existing = self.world.get_block(tx, ty, tz);
@@ -393,14 +439,7 @@ impl Game {
         }
 
         for (tx, tz) in targets {
-            let key = ckey(tx, tz);
-            if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, tx, tz) {
-                if let Some(ch) = self.world.chunks.get_mut(&key) {
-                    ch.meshed = true;
-                    ch.faces = solid.face_count() + liquid.face_count();
-                }
-                self.renderer.upload_chunk(key, &solid, &liquid);
-            }
+            self.remesh(tx, tz);
         }
     }
 
@@ -495,24 +534,25 @@ impl Game {
         }
 
         let active = !self.inv_open && !self.survival.dead;
-        let k = |c: &str| active && *self.keys.get(c).unwrap_or(&false);
+        let pressed = self.keys;
+        let k = |mask: u32| active && pressed & mask != 0;
 
         let (fwd, right) = self.player.basis();
         let mut mx = 0.0;
         let mut mz = 0.0;
-        if k("KeyW") || k("ArrowUp") {
+        if k(keys::FORWARD) {
             mx += fwd[0];
             mz += fwd[1];
         }
-        if k("KeyS") || k("ArrowDown") {
+        if k(keys::BACK) {
             mx -= fwd[0];
             mz -= fwd[1];
         }
-        if k("KeyD") || k("ArrowRight") {
+        if k(keys::RIGHT) {
             mx += right[0];
             mz += right[1];
         }
-        if k("KeyA") || k("ArrowLeft") {
+        if k(keys::LEFT) {
             mx -= right[0];
             mz -= right[1];
         }
@@ -522,7 +562,7 @@ impl Game {
             mz /= len;
         }
 
-        let want_sprint = k("ControlLeft") || k("ControlRight");
+        let want_sprint = k(keys::SPRINT);
         let sprinting = want_sprint && self.survival.can_sprint();
 
         // Ayaklar suyun içindeyse yüzme fiziği devreye girer (H6).
@@ -532,9 +572,9 @@ impl Game {
             if sprinting { 30.0 } else { 14.0 }
         } else if in_water {
             if sprinting { SWIM_SPRINT_SPEED } else { SWIM_SPEED }
-        } else if sprinting && (k("KeyW") || k("ArrowUp")) {
+        } else if sprinting && k(keys::FORWARD) {
             7.8
-        } else if k("ShiftLeft") || k("ShiftRight") {
+        } else if k(keys::SNEAK) {
             2.4
         } else {
             5.2
@@ -554,10 +594,10 @@ impl Game {
         self.jumped = false;
         if self.player.flying {
             let mut vy = 0.0;
-            if k("Space") {
+            if k(keys::JUMP) {
                 vy += speed * 0.78;
             }
-            if k("ShiftLeft") || k("ShiftRight") {
+            if k(keys::SNEAK) {
                 vy -= speed * 0.78;
             }
             self.player.vel[1] += (vy - self.player.vel[1]) * blend;
@@ -566,11 +606,11 @@ impl Game {
             // Yüzme: yerçekimi uygulanmaz, hedef hıza yumuşak geçiş yapılır.
             // `Space` yukarı çeker, bırakılınca oyuncu yavaşça batar. Eskiden
             // yerçekimi aynen işliyordu ve oyuncu dibe batıp boğuluyordu.
-            let target = if k("Space") { SWIM_UP } else { -SWIM_SINK };
+            let target = if k(keys::JUMP) { SWIM_UP } else { -SWIM_SINK };
             self.player.vel[1] += (target - self.player.vel[1]) * (dt * 8.0).min(1.0);
             self.player.on_ground = false;
         } else {
-            if k("Space") && self.player.on_ground {
+            if k(keys::JUMP) && self.player.on_ground {
                 self.player.vel[1] = crate::player::JUMP_SPEED;
                 self.player.on_ground = false;
                 self.jumped = true;
@@ -652,11 +692,6 @@ impl Game {
             self.fps_frames = 0;
         }
 
-        let hand = match self.inv.selected_stack() {
-            Some(s) => format!("{} ×{}", item_name(s.id), s.count),
-            None => "Boş".to_string(),
-        };
-
         let debug = DebugInfo {
             fps: self.fps,
             pos: self.player.pos,
@@ -664,9 +699,9 @@ impl Game {
             draws: self.renderer.stats_draws,
             tris: self.renderer.stats_tris,
             render_dist: self.render_dist,
-            mode_label: self.survival.mode.label().to_string(),
-            fly_label: if self.player.flying { "Uçuş" } else { "Yürüyüş" }.to_string(),
-            hand,
+            mode_label: self.survival.mode.label(),
+            fly_label: if self.player.flying { "Uçuş" } else { "Yürüyüş" },
+            hand: self.inv.selected_stack(),
         };
 
         let inv_open = self.inv_open;
@@ -711,7 +746,7 @@ impl Game {
             return;
         }
 
-        self.keys.insert(code.clone(), true);
+        self.keys |= keys::bit(&code);
 
         if code == "Space" {
             e.prevent_default();
@@ -751,7 +786,15 @@ impl Game {
     }
 
     fn on_key_up(&mut self, e: &KeyboardEvent) {
-        self.keys.insert(e.code(), false);
+        self.keys &= !keys::bit(&e.code());
+    }
+
+    /// Pencere odağı kaybedildiğinde (Alt+Tab, sekme değişimi) `keyup` olayı
+    /// hiç gelmez; tuşlar temizlenmezse oyuncu sonsuza dek yürümeye devam eder.
+    fn on_blur(&mut self) {
+        self.keys = 0;
+        self.dragging = false;
+        self.drag_button = -1;
     }
 
     fn on_mouse_move(&mut self, e: &MouseEvent) {
@@ -828,10 +871,10 @@ impl Game {
             return;
         }
         self.inv_open = true;
-        self.keys.clear();
+        self.keys = 0;
         self.dragging = false;
         if self.document.pointer_lock_element().is_some() {
-            let _ = self.document.exit_pointer_lock();
+            self.document.exit_pointer_lock();
         }
     }
 
@@ -864,15 +907,7 @@ impl Game {
                 }
             }
             "result" => {
-                if let Some((id, n)) = crafting::take_result(&mut self.grid) {
-                    match self.held {
-                        Some(ref mut h) if h.id == id && h.count as u32 + n as u32 <= MAX_STACK as u32 => {
-                            h.count += n;
-                        }
-                        None => self.held = Some(Stack::new(id, n)),
-                        _ => {}
-                    }
-                }
+                crafting::take_result_into(&mut self.grid, &mut self.held);
             }
             _ => {
                 let target: Option<&mut Option<Stack>> = match kind {
@@ -1233,9 +1268,7 @@ pub fn start() -> Result<(), JsValue> {
     let world = World::new(seed);
     let spawn = world.find_spawn();
 
-    let mut player = Player::default();
-    player.pos = spawn;
-    player.flying = false;
+    let player = Player { pos: spawn, flying: false, ..Player::default() };
 
     let mut inv = Inventory::new();
     inv.give_starter_kit();
@@ -1258,7 +1291,9 @@ pub fn start() -> Result<(), JsValue> {
         hud,
         window: window.clone(),
         document: document.clone(),
-        keys: HashMap::new(),
+        keys: 0,
+        mesh_solid: MeshData::default(),
+        mesh_liquid: MeshData::default(),
         mouse: (0.0, 0.0),
         pointer_locked: false,
         dragging: false,
@@ -1351,6 +1386,14 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+            g.borrow_mut().on_blur();
+        });
+        window.add_event_listener_with_callback("blur", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+    {
+        let g = game.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
             let mut game = g.borrow_mut();
             resize_canvases(&mut game);
         });
@@ -1419,7 +1462,8 @@ pub fn start() -> Result<(), JsValue> {
     }
 
     // --- oyun döngüsü ---
-    let slot: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+    type FrameLoop = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
+    let slot: FrameLoop = Rc::new(RefCell::new(None));
     {
         let slot2 = slot.clone();
         let g = game.clone();

@@ -5,6 +5,9 @@
 //! ikinci bir tuval üzerine çizilir. Yerleşim her karede hesaplanır ve aynı
 //! dikdörtgenler hem çizim hem de fare isabet testi için kullanılır.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
@@ -53,6 +56,9 @@ pub struct Hud {
     pub height: f64,
     toast: Option<(String, f64)>,
     pub layout: Option<Layout>,
+    /// Son çizilen karenin görünür durum özeti. Değişmediyse HUD yeniden
+    /// çizilmez (bkz. `Hud::draw`).
+    last_signature: Option<u64>,
 }
 
 /// Piksel sanatı ikonlar (9×8). `1` ana renk, `2` koyu kenar.
@@ -111,12 +117,16 @@ impl Hud {
             height: 1.0,
             toast: None,
             layout: None,
+            last_signature: None,
         })
     }
 
     pub fn resize(&mut self, w: f64, h: f64) {
         self.width = w;
         self.height = h;
+        // Tuval boyutu atandığında (aynı değer olsa bile) içerik silinir:
+        // bir sonraki kare mutlaka yeniden çizilmeli.
+        self.last_signature = None;
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -398,6 +408,7 @@ impl Hud {
     }
 
     /// Piksel ikon çizer; `value` 0..max arasında o ikonun doluluk oranını verir.
+    #[allow(clippy::too_many_arguments)]
     fn pixel_icon(
         &self,
         bmp: &[&str; 8],
@@ -517,19 +528,13 @@ impl Hud {
 
     /// Sağ üstteki ölçüm paneli.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_debug(
-        &self,
-        fps: u32,
-        pos: [f64; 3],
-        chunks: usize,
-        draws: u32,
-        tris: u32,
-        render_dist: i32,
-        mode_label: &str,
-        fly_label: &str,
-        hand: &str,
-    ) {
-        let ctx = &self.ctx;
+    pub fn draw_debug(&self, d: &DebugInfo) {
+        let DebugInfo { fps, pos, chunks, draws, tris, render_dist, mode_label, fly_label, hand } =
+            *d;
+        let hand = match hand {
+            Some(s) => format!("{} ×{}", item_name(s.id), s.count),
+            None => "Boş".to_string(),
+        };
         let lines = [
             ("FPS", fps.to_string()),
             (
@@ -541,8 +546,9 @@ impl Hud {
             ("Çizim", format!("{draws} · {:.0}k üçgen", tris as f64 / 1000.0)),
             ("Mod", fly_label.to_string()),
             ("Oyun", mode_label.to_string()),
-            ("El", hand.to_string()),
+            ("El", hand),
         ];
+        let ctx = &self.ctx;
         let x = 12.0;
         let mut y = 16.0;
         for (k, v) in lines.iter() {
@@ -570,6 +576,15 @@ impl Hud {
         hud_visible: bool,
         debug: Option<DebugInfo>,
     ) {
+        // HUD, kalp/açlık ikonlarını piksel piksel çizer: tek bir kare yüzlerce
+        // Canvas2D çağrısı (wasm→JS geçişi) demektir. Ekranda görünen hiçbir
+        // şey değişmediyse önceki kare olduğu gibi bırakılır.
+        let sig = self.signature(inv_open, inv, grid, survival, held, mouse, hud_visible, &debug);
+        if self.layout.is_some() && self.last_signature == Some(sig) {
+            return;
+        }
+        self.last_signature = Some(sig);
+
         let ctx = &self.ctx;
         ctx.clear_rect(0.0, 0.0, self.width, self.height);
         let l = self.compute_layout(inv_open);
@@ -605,10 +620,7 @@ impl Hud {
                 }
                 self.draw_vitals(survival, &l);
                 if let Some(d) = &debug {
-                    self.draw_debug(
-                        d.fps, d.pos, d.chunks, d.draws, d.tris, d.render_dist,
-                        &d.mode_label, &d.fly_label, &d.hand,
-                    );
+                    self.draw_debug(d);
                 }
             }
             self.draw_toast();
@@ -643,6 +655,74 @@ impl Hud {
         }
 
         self.layout = Some(l);
+    }
+
+    /// Bir karede **görünen** her şeyin özeti. Süreklilik gösteren değerler
+    /// (nefes, vinyet, bildirim saydamlığı) ekranda fark edilebilecek
+    /// adımlara yuvarlanır; böylece yalnızca gerçekten değişen kareler çizilir.
+    #[allow(clippy::too_many_arguments)]
+    fn signature(
+        &self,
+        inv_open: bool,
+        inv: &Inventory,
+        grid: &Grid,
+        survival: &Survival,
+        held: Option<Stack>,
+        mouse: (f64, f64),
+        hud_visible: bool,
+        debug: &Option<DebugInfo>,
+    ) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.width.to_bits().hash(&mut h);
+        self.height.to_bits().hash(&mut h);
+        inv_open.hash(&mut h);
+        hud_visible.hash(&mut h);
+        inv.slots.hash(&mut h);
+        inv.selected.hash(&mut h);
+        grid.hash(&mut h);
+        held.hash(&mut h);
+        if held.is_some() {
+            // Fare yalnızca elde taşınan yığın çizilirken önemlidir.
+            (mouse.0 as i32, mouse.1 as i32).hash(&mut h);
+        }
+
+        survival.mode.hash(&mut h);
+        survival.dead.hash(&mut h);
+        survival.health.hash(&mut h);
+        survival.hunger.hash(&mut h);
+        // Nefes ikonları tam / yarım / boş gösterilir: değer, ikon sınırları
+        // (her 2 birim) arasındaki konumuna indirgenir.
+        let air_step = MAX_AIR / 10.0;
+        let air_visible = survival.air < MAX_AIR - 0.01;
+        air_visible.hash(&mut h);
+        if air_visible {
+            ((survival.air / air_step).floor() as i32).hash(&mut h);
+            ((survival.air / air_step).ceil() as i32).hash(&mut h);
+        }
+        if survival.hurt_flash > 0.001 {
+            ((survival.hurt_flash * 255.0) as u32).hash(&mut h);
+        }
+
+        if let Some((text, life)) = &self.toast {
+            text.hash(&mut h);
+            (((life / 0.4).min(1.0) * 255.0) as u32).hash(&mut h);
+        }
+
+        if let Some(d) = debug {
+            d.fps.hash(&mut h);
+            // Panel konumu tam sayıya yuvarlanmış gösterir.
+            for p in d.pos {
+                (p.round() as i64).hash(&mut h);
+            }
+            d.chunks.hash(&mut h);
+            d.draws.hash(&mut h);
+            ((d.tris as f64 / 1000.0).round() as u32).hash(&mut h);
+            d.render_dist.hash(&mut h);
+            d.mode_label.hash(&mut h);
+            d.fly_label.hash(&mut h);
+            d.hand.hash(&mut h);
+        }
+        h.finish()
     }
 
     fn draw_inventory(
@@ -825,7 +905,9 @@ impl Hud {
     }
 }
 
-/// HUD'a aktarılan ölçüm bilgileri.
+/// HUD'a aktarılan ölçüm bilgileri. Kare başına dize ayırmamak için yalnızca
+/// ham değerler taşır; metinler panel gerçekten çizilirken üretilir.
+#[derive(Clone, Copy)]
 pub struct DebugInfo {
     pub fps: u32,
     pub pos: [f64; 3],
@@ -833,7 +915,7 @@ pub struct DebugInfo {
     pub draws: u32,
     pub tris: u32,
     pub render_dist: i32,
-    pub mode_label: String,
-    pub fly_label: String,
-    pub hand: String,
+    pub mode_label: &'static str,
+    pub fly_label: &'static str,
+    pub hand: Option<Stack>,
 }
