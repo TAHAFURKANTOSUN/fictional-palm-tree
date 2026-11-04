@@ -40,6 +40,12 @@ pub struct Chunk {
     /// blok üstüne çıkar, bu yüzden ağaç tepeleri eskiden mesh dışında kalıp
     /// görünmez oluyordu (bloklar katı kalıyordu).
     pub content_top: i32,
+    /// Bu chunk'taki **en alçak açık (opak olmayan) blok**. Altındaki her şey
+    /// opaktır, yani hiçbir yüz görünmez; mesh'in alt sınırı buradan çıkar.
+    ///
+    /// Gürültüden hesaplanan arazi yüksekliği yetmez: oyuncu arazinin altına
+    /// kazdığında çukurun tabanı mesh dışında kalıp görünmez olurdu.
+    pub open_bottom: i32,
     pub faces: u32,
 }
 
@@ -103,6 +109,9 @@ impl World {
             if y > ch.content_top {
                 ch.content_top = y;
             }
+            if y < ch.open_bottom && !is_opaque(v) {
+                ch.open_bottom = y;
+            }
         }
 
         self.edits.entry(key).or_default().insert(idx, v);
@@ -119,6 +128,9 @@ impl World {
         // Chunk'taki gerçek en yüksek dolu blok — mesh'in y aralığı buna göre
         // daraltılır. Ağaç yaprakları da dâhil edilmezse tepeleri görünmez olur.
         let mut content_top = 0;
+        // Sütunlar `0..=h` arasında tamamen opaktır (ana kaya/taş/toprak/kum/çim);
+        // ilk açık blok `h + 1`'dedir (su ya da hava).
+        let mut open_bottom = WORLD_HEIGHT;
 
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
@@ -148,6 +160,7 @@ impl World {
                 }
 
                 content_top = content_top.max(h);
+                open_bottom = open_bottom.min(h + 1);
                 if h < SEA_LEVEL {
                     content_top = content_top.max(SEA_LEVEL);
                 }
@@ -178,12 +191,15 @@ impl World {
                 if y > content_top {
                     content_top = y;
                 }
+                if !is_opaque(v) {
+                    open_bottom = open_bottom.min(y);
+                }
             }
         }
 
         self.chunks.insert(
             key,
-            Chunk { cx, cz, data, meshed: false, content_top, faces: 0 },
+            Chunk { cx, cz, data, meshed: false, content_top, open_bottom, faces: 0 },
         );
         key
     }

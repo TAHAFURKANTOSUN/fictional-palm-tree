@@ -113,6 +113,13 @@ pub fn is_liquid(id: u8) -> bool {
     block_def(id).liquid
 }
 
+/// Arkasını tamamen kapatan blok mu? (Hava ve saydam bloklar değildir.)
+/// Mesh'te yüz görünürlüğü ve ambient occlusion bu kurala göre çalışır.
+#[inline]
+pub fn is_opaque(id: u8) -> bool {
+    id != AIR && !block_def(id).transparent
+}
+
 /// Envanterdeki bir eşyanın ikonu nasıl çizilir.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {

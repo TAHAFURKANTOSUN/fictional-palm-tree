@@ -1,20 +1,47 @@
 //! Chunk mesh üretimi: görünen yüzler + ambient occlusion.
 //!
-//! Yüz başına 4 köşe üretilir; komşu veriler 3×3 tabloya önceden alınır, böylece
-//! mesh sırasında hiç `HashMap` araması yapılmaz.
+//! Çıktı doğrudan GPU'nun okuduğu **paketlenmiş** biçimdedir: köşe başına
+//! 8 bayt (bkz. [`Vertex`]). `gl.rs` bu baytları ara dönüşüm ya da kopya
+//! olmadan yükler.
+//!
+//! * **İndeks üretilmez.** Her yüz 4 ardışık köşedir ve tüm chunk'lar tek bir
+//!   paylaşılan dörtgen indeks tamponuyla ([`QUAD_PATTERN`]) çizilir. AO'ya göre
+//!   seçilen köşegen, indeksler yerine köşe sırası döndürülerek uygulanır.
+//! * **UV gönderilmez.** Döşeme numarası ve köşe kodu tek bir bayta sığar;
+//!   doku koordinatı gölgelendiricide hesaplanır. Normal hiç kullanılmadığı
+//!   için hiç üretilmez (gölgelendirme köşe rengine işlenmiştir).
+//! * **Komşu tablosu.** Chunk ve 8 komşusunun ilgili dilimi önce 18×18×H'lik
+//!   dolgulu bir diziye kopyalanır; böylece mesh sırasında her komşu okuması
+//!   tek bir dizi indeksidir (`HashMap` ya da chunk hesabı yok).
 
 use crate::blocks::*;
 use crate::noise::hash3f;
-use crate::world::{ckey, World, CHUNK_AREA, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
+use crate::world::{ckey, World, CHUNK_AREA, CHUNK_SIZE, WORLD_HEIGHT};
 
-/// Doku atlası döşeme boyutu ve sütun sayısı.
-pub const TILE: i32 = 16;
-pub const ATLAS_COLS: i32 = 16;
+/// Paketlenmiş köşe (8 bayt):
+///
+/// | bayt | anlam |
+/// |---|---|
+/// | 0..3 | chunk-yerel `x, y, z` (`x,z ∈ 0..=16`, `y ∈ 0..=64`) |
+/// | 3 | `döşeme * 4 + köşe` (köşe: bit0 = u, bit1 = v) |
+/// | 4..7 | renk `r, g, b` (unorm8) — doku tonu × gölge × AO |
+/// | 7 | 255 (kullanılmıyor; 4 baytlık hizalı biçim için) |
+pub type Vertex = [u8; 8];
 
-/// Doku kenarında komşu döşemeye taşmayı önleyen yarım piksel payı.
-const EPS_V: f32 = 0.5 / TILE as f32;
+/// Bir köşenin bayt boyutu (GPU tampon adımı).
+pub const VERTEX_BYTES: usize = std::mem::size_of::<Vertex>();
+
+/// Dörtgen başına indeks deseni: `(0,1,2)` ve `(0,2,3)` üçgenleri.
+pub const QUAD_PATTERN: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+/// Döşeme numarası `tile * 4 + 3` olarak bir bayta sığmalı.
+const MAX_TILES: u8 = 64;
 
 const AO_LEVELS: [f32; 4] = [0.52, 0.70, 0.86, 1.0];
+
+/// `FACES[..].verts` sırasındaki köşelerin UV kodu: `u | v << 1`.
+/// (0 → (u0,v0), 1 → (u1,v0), 2 → (u1,v1), 3 → (u0,v1))
+const CORNER_UV: [u8; 4] = [0b00, 0b01, 0b11, 0b10];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TileKind {
@@ -30,271 +57,307 @@ pub struct Face {
     pub c: usize,
     pub shade: f32,
     pub tile: TileKind,
-    pub verts: [[f32; 3]; 4],
+    pub verts: [[u8; 3]; 4],
 }
 
 pub const FACES: [Face; 6] = [
     Face {
         n: [1, 0, 0], b: 1, c: 2, shade: 0.76, tile: TileKind::Side,
-        verts: [[1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]],
+        verts: [[1, 0, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]],
     },
     Face {
         n: [-1, 0, 0], b: 1, c: 2, shade: 0.76, tile: TileKind::Side,
-        verts: [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0]],
+        verts: [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]],
     },
     Face {
         n: [0, 1, 0], b: 0, c: 2, shade: 1.00, tile: TileKind::Top,
-        verts: [[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        verts: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]],
     },
     Face {
         n: [0, -1, 0], b: 0, c: 2, shade: 0.48, tile: TileKind::Bottom,
-        verts: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+        verts: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]],
     },
     Face {
         n: [0, 0, 1], b: 0, c: 1, shade: 0.62, tile: TileKind::Side,
-        verts: [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+        verts: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
     },
     Face {
         n: [0, 0, -1], b: 0, c: 1, shade: 0.62, tile: TileKind::Side,
-        verts: [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
+        verts: [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]],
     },
 ];
 
-/// Bir chunk'ın katı ve sıvı geometrisi.
-#[derive(Default)]
+/// Bir chunk katmanının (katı ya da sıvı) GPU'ya hazır geometrisi.
+#[derive(Default, Clone)]
 pub struct MeshData {
-    pub pos: Vec<f32>,
-    pub nor: Vec<f32>,
-    pub uv: Vec<f32>,
-    pub col: Vec<f32>,
-    pub idx: Vec<u32>,
+    /// Dörtlü gruplar hâlinde köşeler; her grup bir yüzdür.
+    pub verts: Vec<Vertex>,
 }
 
 impl MeshData {
     pub fn is_empty(&self) -> bool {
-        self.idx.is_empty()
+        self.verts.is_empty()
     }
 
+    /// Yüz (dörtgen) sayısı.
     pub fn face_count(&self) -> u32 {
-        (self.idx.len() / 6) as u32
+        (self.verts.len() / 4) as u32
     }
 
-    /// Tamponları temizler — havuzdan yeniden kullanılırken ayırma yapılmaz.
+    /// Paylaşılan indeks tamponundan çizilecek indeks sayısı.
+    pub fn index_count(&self) -> u32 {
+        self.face_count() * QUAD_PATTERN.len() as u32
+    }
+
+    /// Tamponu temizler — yeniden kullanılırken ayırma yapılmaz.
     pub fn reset(&mut self) {
-        self.pos.clear();
-        self.nor.clear();
-        self.uv.clear();
-        self.col.clear();
-        self.idx.clear();
+        self.verts.clear();
     }
 
-    /// Vertex konumlarının kapsayıcı küresini (merkez, yarıçap) döndürür.
-    /// Görüş konisi (frustum) elemesi için kullanılır.
-    pub fn bounding_sphere(&self) -> ([f32; 3], f32) {
-        if self.pos.is_empty() {
-            return ([0.0; 3], 0.0);
-        }
-        let mut min = [f32::MAX; 3];
-        let mut max = [f32::MIN; 3];
-        for p in self.pos.chunks_exact(3) {
+    /// GPU'ya gidecek ham baytlar (kopya yok).
+    pub fn as_bytes(&self) -> &[u8] {
+        self.verts.as_flattened()
+    }
+
+    /// Chunk-yerel kapsayıcı kutu `(min, max)`; görüş konisi elemesi için.
+    pub fn local_bounds(&self) -> Option<([u8; 3], [u8; 3])> {
+        let first = self.verts.first()?;
+        let mut min = [first[0], first[1], first[2]];
+        let mut max = min;
+        for v in &self.verts {
             for a in 0..3 {
-                min[a] = min[a].min(p[a]);
-                max[a] = max[a].max(p[a]);
+                min[a] = min[a].min(v[a]);
+                max[a] = max[a].max(v[a]);
             }
         }
-        let center = [
-            (min[0] + max[0]) * 0.5,
-            (min[1] + max[1]) * 0.5,
-            (min[2] + max[2]) * 0.5,
-        ];
-        let r = ((max[0] - center[0]).powi(2)
-            + (max[1] - center[1]).powi(2)
-            + (max[2] - center[2]).powi(2))
-        .sqrt();
-        (center, r)
+        Some((min, max))
     }
+}
+
+/// Köşenin chunk-yerel konumu.
+#[inline]
+pub fn vertex_pos(v: &Vertex) -> [u8; 3] {
+    [v[0], v[1], v[2]]
+}
+
+/// Köşenin döşeme numarası ve UV kodu (`u | v << 1`).
+#[inline]
+pub fn vertex_tile(v: &Vertex) -> (u8, u8) {
+    (v[3] >> 2, v[3] & 3)
 }
 
 #[inline]
-fn occludes(id: u8) -> bool {
-    id != AIR && !block_def(id).transparent
+fn unorm8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
-fn push_face(
-    bk: &mut MeshData,
-    occl: &impl Fn(i32, i32, i32) -> bool,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    def: &BlockDef,
-    face: &Face,
-) {
-    let tile_index = match face.tile {
-        TileKind::Top => def.top,
-        TileKind::Bottom => def.bottom,
-        TileKind::Side => def.side,
-    };
-
-    let atlas_w = (TILE * ATLAS_COLS) as f32;
-    let u0 = (tile_index as f32 * TILE as f32 + 0.5) / atlas_w;
-    let u1 = ((tile_index as f32 + 1.0) * TILE as f32 - 0.5) / atlas_w;
-    let v0 = EPS_V;
-    let v1 = 1.0 - EPS_V;
-
-    let tint = def.tint;
-    let (mut vr, mut vg, mut vb) = (1.0f32, 1.0f32, 1.0f32);
-    if def.vary {
-        let m = 0.90 + hash3f(wx, wy, wz) as f32 * 0.20;
-        vr = m;
-        vg = m;
-        vb = m;
-    }
-
-    let base = (bk.pos.len() / 3) as u32;
-    let mut ao = [0usize; 4];
-
-    for (i, p) in face.verts.iter().enumerate() {
-        bk.pos.push(wx as f32 + p[0]);
-        bk.pos.push(wy as f32 + p[1]);
-        bk.pos.push(wz as f32 + p[2]);
-        bk.nor.push(face.n[0] as f32);
-        bk.nor.push(face.n[1] as f32);
-        bk.nor.push(face.n[2] as f32);
-
-        let (u, v) = match i {
-            0 => (u0, v0),
-            1 => (u1, v0),
-            2 => (u1, v1),
-            _ => (u0, v1),
-        };
-        bk.uv.push(u);
-        bk.uv.push(v);
-
-        let ob: i32 = if p[face.b] == 1.0 { 1 } else { -1 };
-        let oc: i32 = if p[face.c] == 1.0 { 1 } else { -1 };
-
-        let bx = wx + face.n[0];
-        let by = wy + face.n[1];
-        let bz = wz + face.n[2];
-
-        let s1 = occl(
-            bx + if face.b == 0 { ob } else { 0 },
-            by + if face.b == 1 { ob } else { 0 },
-            bz + if face.b == 2 { ob } else { 0 },
-        );
-        let s2 = occl(
-            bx + if face.c == 0 { oc } else { 0 },
-            by + if face.c == 1 { oc } else { 0 },
-            bz + if face.c == 2 { oc } else { 0 },
-        );
-        let sc = occl(
-            bx + if face.b == 0 { ob } else { 0 } + if face.c == 0 { oc } else { 0 },
-            by + if face.b == 1 { ob } else { 0 } + if face.c == 1 { oc } else { 0 },
-            bz + if face.b == 2 { ob } else { 0 } + if face.c == 2 { oc } else { 0 },
-        );
-
-        let level = if s1 && s2 {
-            0
-        } else {
-            3 - (s1 as usize + s2 as usize + sc as usize)
-        };
-        ao[i] = level;
-
-        let f = face.shade * AO_LEVELS[level];
-        bk.col.push((tint[0] * vr * f).clamp(0.0, 1.0));
-        bk.col.push((tint[1] * vg * f).clamp(0.0, 1.0));
-        bk.col.push((tint[2] * vb * f).clamp(0.0, 1.0));
-    }
-
-    // Köşegen yönü AO'ya göre seçilir; aksi halde gölgeleme "yamalı" görünür.
-    if ao[0] + ao[2] > ao[1] + ao[3] {
-        bk.idx.extend_from_slice(&[base + 1, base + 2, base + 3, base + 1, base + 3, base]);
-    } else {
-        bk.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
+/// AO köşegeni: `true` ise dörtgen `1–3` köşegeninden bölünür. Aksi hâlde
+/// gölgeleme "yamalı" görünür.
+#[inline]
+pub fn flip_diagonal(ao: [usize; 4]) -> bool {
+    ao[0] + ao[2] > ao[1] + ao[3]
 }
 
-/// Bir chunk için katı ve sıvı mesh üretir.
-///
-/// 8 komşusunun verisi hazır değilse `None` döner (sınırda hayalet yüz oluşmasın).
-pub fn build_chunk_mesh(world: &World, cx: i32, cz: i32) -> Option<(MeshData, MeshData)> {
-    let ch = world.chunks.get(&ckey(cx, cz))?;
+/// Dolgulu komşu tablosunun yatay boyutu: chunk + her yanda 1 blok.
+const PX: usize = CHUNK_SIZE as usize + 2;
+const PAREA: usize = PX * PX;
 
-    let mut nbs: [&[u8]; 9] = [&[]; 9];
-    for dz in -1..=1 {
-        for dx in -1..=1 {
-            let n = world.chunks.get(&ckey(cx + dx, cz + dz))?;
-            nbs[((dx + 1) + 3 * (dz + 1)) as usize] = &n.data;
-        }
+/// Dolgulu tabloda bir eksen boyunca 1 bloğun ofseti.
+const AXIS_STRIDE: [isize; 3] = [1, PAREA as isize, PX as isize];
+
+/// Yeniden kullanılabilir mesh üreticisi. Tamponlar kareler arasında
+/// korunur; kararlı durumda mesh üretimi hiç bellek ayırmaz.
+#[derive(Default)]
+pub struct Mesher {
+    /// 18×18×(y aralığı + 2) blok kimlikleri.
+    pad: Vec<u8>,
+    pub solid: MeshData,
+    pub liquid: MeshData,
+}
+
+impl Mesher {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    let x0 = cx * CHUNK_SIZE;
-    let z0 = cz * CHUNK_SIZE;
+    /// `(cx, cz)` chunk'ının katı ve sıvı mesh'ini `self.solid` /
+    /// `self.liquid` içine üretir.
+    ///
+    /// 8 komşusunun verisi hazır değilse `false` döner (sınırda hayalet yüz
+    /// oluşmasın); tamponlar o durumda boş bırakılır.
+    pub fn build(&mut self, world: &World, cx: i32, cz: i32) -> bool {
+        self.solid.reset();
+        self.liquid.reset();
 
-    // Yerel okuma: x,z ∈ [-1,16], y ∈ [0,63].
-    let get = |x: i32, y: i32, z: i32| -> u8 {
-        if y < 0 {
-            return STONE;
-        }
-        if y >= WORLD_HEIGHT {
-            return AIR;
-        }
-        let d = nbs[(((x >> 4) + 1) + 3 * ((z >> 4) + 1)) as usize];
-        d[(x & 15) as usize + CHUNK_SIZE as usize * ((z & 15) as usize + CHUNK_SIZE as usize * y as usize)]
-    };
-
-    let occl = |wx: i32, wy: i32, wz: i32| -> bool { occludes(get(wx - x0, wy, wz - z0)) };
-
-    // Mesh'in y aralığını daralt: yeraltı bloklarının hiçbir yüzü görünmez.
-    // Komşu sütun yükseklikleri de hesaba katılır (chunk sınırı duvarları).
-    let mut min_h = i32::MAX;
-    let mut max_h = i32::MIN;
-    for z in -1..=CHUNK_SIZE {
-        for x in -1..=CHUNK_SIZE {
-            let h = world.height_at(x0 + x, z0 + z);
-            min_h = min_h.min(h);
-            max_h = max_h.max(h);
-        }
-    }
-    // Üst sınır **arazi yüksekliği değil**, chunk'ın gerçek en yüksek dolu
-    // bloğudur: ağaç yaprakları zeminin 6–8 blok üstüne çıkar. Yalnızca arazi
-    // yüksekliğine bakılırsa yaprak tepeleri mesh dışında kalır ve görünmez
-    // (ama katı) bloklar oluşur.
-    let y_top = max_h.max(SEA_LEVEL).max(ch.content_top);
-    let y0 = (min_h - 1).max(0);
-    let y1 = (y_top + 2).min(WORLD_HEIGHT - 1);
-
-    let mut solid = MeshData::default();
-    let mut liquid = MeshData::default();
-
-    for y in y0..=y1 {
-        let y_base = CHUNK_AREA * y as usize;
-        for z in 0..CHUNK_SIZE {
-            let row_base = y_base + CHUNK_SIZE as usize * z as usize;
-            for x in 0..CHUNK_SIZE {
-                let id = ch.data[row_base + x as usize];
-                if id == AIR {
-                    continue;
+        let mut nbs: [&[u8]; 9] = [&[]; 9];
+        let mut open_bottom = i32::MAX;
+        let mut content_top = 0;
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let Some(n) = world.chunks.get(&ckey(cx + dx, cz + dz)) else {
+                    return false;
+                };
+                nbs[((dx + 1) + 3 * (dz + 1)) as usize] = &n.data;
+                // Yüz görünürlüğü yalnızca kendisine ve 4 kenar komşusuna
+                // bağlıdır; çapraz komşular yalnızca AO'yu etkiler.
+                if dx == 0 || dz == 0 {
+                    open_bottom = open_bottom.min(n.open_bottom);
                 }
-                let def = block_def(id);
-                let bk = if def.liquid { &mut liquid } else { &mut solid };
+                if dx == 0 && dz == 0 {
+                    content_top = n.content_top;
+                }
+            }
+        }
 
-                for face in FACES.iter() {
-                    let nb = get(x + face.n[0], y + face.n[1], z + face.n[2]);
-                    let visible = if nb == AIR {
-                        true
-                    } else {
-                        block_def(nb).transparent && nb != id
-                    };
-                    if visible {
-                        push_face(bk, &occl, x0 + x, y, z0 + z, def, face);
+        // y aralığı: `open_bottom - 1`'in altındaki her bloğun 6 komşusu da
+        // opaktır (görünmez); `content_top`'ın üstü ise tamamen havadır.
+        let y0 = (open_bottom - 1).max(0);
+        let y1 = content_top.min(WORLD_HEIGHT - 1);
+        if y1 < y0 {
+            return true;
+        }
+
+        // --- dolgulu komşu tablosu: x,z ∈ [-1,16], y ∈ [y0-1, y1+1] ---
+        let py0 = y0 - 1;
+        let layers = (y1 - y0 + 3) as usize;
+        self.pad.clear();
+        self.pad.resize(PAREA * layers, AIR);
+        let cs = CHUNK_SIZE as usize;
+        for layer in 0..layers {
+            let y = py0 + layer as i32;
+            let base = layer * PAREA;
+            let row = &mut self.pad[base..base + PAREA];
+            if y < 0 {
+                row.fill(STONE);
+                continue;
+            }
+            if y >= WORLD_HEIGHT {
+                continue; // zaten AIR
+            }
+            let yo = CHUNK_AREA * y as usize;
+            for pz in 0..PX {
+                let (nz, lz) = match pz {
+                    0 => (0, cs - 1),
+                    p if p == PX - 1 => (2, 0),
+                    p => (1, p - 1),
+                };
+                let src = yo + cs * lz;
+                let dst = &mut row[pz * PX..(pz + 1) * PX];
+                dst[0] = nbs[3 * nz][src + cs - 1];
+                dst[1..=cs].copy_from_slice(&nbs[1 + 3 * nz][src..src + cs]);
+                dst[PX - 1] = nbs[2 + 3 * nz][src];
+            }
+        }
+        let pad = &self.pad[..];
+
+        // --- yüz başına sabitler: komşu ofseti + 4 köşenin AO örnekleri ---
+        let mut nb_off = [0isize; 6];
+        let mut ao_off = [[[0isize; 3]; 4]; 6];
+        for (f, face) in FACES.iter().enumerate() {
+            nb_off[f] = face.n[0] as isize * AXIS_STRIDE[0]
+                + face.n[1] as isize * AXIS_STRIDE[1]
+                + face.n[2] as isize * AXIS_STRIDE[2];
+            for (i, p) in face.verts.iter().enumerate() {
+                let ob = if p[face.b] == 1 { 1 } else { -1 } * AXIS_STRIDE[face.b];
+                let oc = if p[face.c] == 1 { 1 } else { -1 } * AXIS_STRIDE[face.c];
+                ao_off[f][i] = [nb_off[f] + ob, nb_off[f] + oc, nb_off[f] + ob + oc];
+            }
+        }
+
+        let x0 = cx * CHUNK_SIZE;
+        let z0 = cz * CHUNK_SIZE;
+
+        for y in y0..=y1 {
+            let layer = (y - py0) as usize * PAREA;
+            for z in 0..CHUNK_SIZE {
+                let row = layer + PX * (z as usize + 1) + 1;
+                for x in 0..CHUNK_SIZE {
+                    let p = row + x as usize;
+                    let id = pad[p];
+                    if id == AIR {
+                        continue;
+                    }
+                    let def = block_def(id);
+                    let mut vary: Option<f32> = None;
+
+                    for (f, face) in FACES.iter().enumerate() {
+                        let nb = pad[(p as isize + nb_off[f]) as usize];
+                        let visible = nb == AIR || (block_def(nb).transparent && nb != id);
+                        if !visible {
+                            continue;
+                        }
+
+                        // Varyasyon blok başına bir kez hesaplanır (yüz başına değil).
+                        let m = *vary.get_or_insert_with(|| {
+                            if def.vary {
+                                0.90 + hash3f(x0 + x, y, z0 + z) as f32 * 0.20
+                            } else {
+                                1.0
+                            }
+                        });
+
+                        let tile = match face.tile {
+                            TileKind::Top => def.top,
+                            TileKind::Bottom => def.bottom,
+                            TileKind::Side => def.side,
+                        };
+                        debug_assert!(tile < MAX_TILES);
+
+                        let mut quad = [[0u8; 8]; 4];
+                        let mut ao = [0usize; 4];
+                        for (i, v) in face.verts.iter().enumerate() {
+                            let o = &ao_off[f][i];
+                            let s1 = is_opaque(pad[(p as isize + o[0]) as usize]);
+                            let s2 = is_opaque(pad[(p as isize + o[1]) as usize]);
+                            let sc = is_opaque(pad[(p as isize + o[2]) as usize]);
+                            let level = if s1 && s2 {
+                                0
+                            } else {
+                                3 - (s1 as usize + s2 as usize + sc as usize)
+                            };
+                            ao[i] = level;
+
+                            let k = face.shade * AO_LEVELS[level];
+                            quad[i] = [
+                                x as u8 + v[0],
+                                y as u8 + v[1],
+                                z as u8 + v[2],
+                                tile * 4 + CORNER_UV[i],
+                                unorm8(def.tint[0] * m * k),
+                                unorm8(def.tint[1] * m * k),
+                                unorm8(def.tint[2] * m * k),
+                                255,
+                            ];
+                        }
+
+                        let out = if def.liquid { &mut self.liquid.verts } else { &mut self.solid.verts };
+                        // Köşegen AO'ya göre seçilir: indeks deseni sabit
+                        // olduğundan köşe sırası döndürülür — (1,2,3)+(1,3,0)
+                        // üçgenleri eskisiyle birebir aynıdır.
+                        if flip_diagonal(ao) {
+                            out.extend_from_slice(&[quad[1], quad[2], quad[3], quad[0]]);
+                        } else {
+                            out.extend_from_slice(&quad);
+                        }
                     }
                 }
             }
         }
-    }
 
-    Some((solid, liquid))
+        true
+    }
+}
+
+/// Bir chunk için katı ve sıvı mesh üretir (tek seferlik kullanım ve testler).
+/// Sık çağrılan yerlerde tamponları korumak için [`Mesher`] kullanın.
+///
+/// 8 komşusunun verisi hazır değilse `None` döner (sınırda hayalet yüz oluşmasın).
+pub fn build_chunk_mesh(world: &World, cx: i32, cz: i32) -> Option<(MeshData, MeshData)> {
+    let mut m = Mesher::new();
+    if !m.build(world, cx, cz) {
+        return None;
+    }
+    Some((m.solid, m.liquid))
 }
 
 /// Testlerin ihtiyaç duyduğu, komşuları hazır küçük dünya.
@@ -313,40 +376,74 @@ pub(crate) fn test_world(seed: i32) -> World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::SEA_LEVEL;
 
-    #[test]
-    fn mesh_has_balanced_attributes() {
-        let mut w = test_world(5);
-        w.generate_chunk(0, 0);
-        let (solid, liquid) = build_chunk_mesh(&w, 0, 0).expect("mesh üretilemedi");
-        assert_eq!(solid.pos.len() % 3, 0);
-        assert_eq!(solid.nor.len(), solid.pos.len());
-        assert_eq!(solid.uv.len() / 2, solid.pos.len() / 3);
-        assert_eq!(solid.col.len(), solid.pos.len());
-        assert_eq!(solid.idx.len() % 6, 0, "her yüz 2 üçgen olmalı");
-        assert!(!solid.is_empty(), "yüzey chunk'ı boş mesh üretmemeli");
-        let _ = liquid;
+    /// Bir mesh'teki tüm köşelerin dünya-yerel `y` değerleri.
+    fn ys(m: &MeshData) -> impl Iterator<Item = u8> + '_ {
+        m.verts.iter().map(|v| vertex_pos(v)[1])
     }
 
     #[test]
-    fn every_index_is_in_range() {
-        let mut w = test_world(9);
-        w.generate_chunk(0, 0);
-        let (solid, liquid) = build_chunk_mesh(&w, 0, 0).unwrap();
-        for (name, m) in [("solid", &solid), ("liquid", &liquid)] {
-            let verts = (m.pos.len() / 3) as u32;
-            for &i in &m.idx {
-                assert!(i < verts, "{name}: indeks {i} tepe sayısı {verts} dışında");
+    fn mesh_is_whole_quads_in_packed_format() {
+        let w = test_world(5);
+        let (solid, liquid) = build_chunk_mesh(&w, 0, 0).expect("mesh üretilemedi");
+        assert!(!solid.is_empty(), "yüzey chunk'ı boş mesh üretmemeli");
+        for m in [&solid, &liquid] {
+            assert_eq!(m.verts.len() % 4, 0, "her yüz 4 köşe olmalı");
+            assert_eq!(m.as_bytes().len(), m.verts.len() * VERTEX_BYTES);
+            assert_eq!(VERTEX_BYTES, 8);
+            for v in &m.verts {
+                let [x, y, z] = vertex_pos(v);
+                assert!(x <= 16 && z <= 16 && y as i32 <= WORLD_HEIGHT, "konum chunk dışında: {v:?}");
+                let (tile, _) = vertex_tile(v);
+                assert!(tile < MAX_TILES);
+                assert_eq!(v[7], 255);
             }
         }
     }
 
     #[test]
     fn face_count_matches_index_count() {
-        let mut w = test_world(11);
-        w.generate_chunk(0, 0);
+        let w = test_world(11);
         let (solid, _) = build_chunk_mesh(&w, 0, 0).unwrap();
-        assert_eq!(solid.face_count() as usize * 6, solid.idx.len());
+        assert_eq!(solid.face_count() as usize * 4, solid.verts.len());
+        assert_eq!(solid.index_count(), solid.face_count() * 6);
+    }
+
+    /// Paylaşılan indeks deseni + döndürülmüş köşe sırası, eski AO'ya bağlı
+    /// indekslerle **aynı üçgenleri** (aynı sarım yönüyle) vermeli.
+    #[test]
+    fn rotated_quads_reproduce_the_ao_diagonal() {
+        let tris = |order: [usize; 4]| -> Vec<[usize; 3]> {
+            QUAD_PATTERN
+                .chunks_exact(3)
+                .map(|t| [order[t[0] as usize], order[t[1] as usize], order[t[2] as usize]])
+                .collect()
+        };
+        // Eski kod: çevrilmişse [1,2,3, 1,3,0], değilse [0,1,2, 0,2,3].
+        assert_eq!(tris([1, 2, 3, 0]), vec![[1, 2, 3], [1, 3, 0]]);
+        assert_eq!(tris([0, 1, 2, 3]), vec![[0, 1, 2], [0, 2, 3]]);
+        assert!(flip_diagonal([3, 0, 3, 0]));
+        assert!(!flip_diagonal([0, 3, 0, 3]));
+        assert!(!flip_diagonal([2, 2, 2, 2]), "eşitlikte köşegen değişmemeli");
+    }
+
+    /// UV kodu, döndürmeden sonra da her köşenin **kendi** köşesini taşımalı:
+    /// bir dörtgenin 4 köşesi 4 farklı UV köşesine sahip olmalı.
+    #[test]
+    fn every_quad_uses_all_four_uv_corners() {
+        let w = test_world(9);
+        let (solid, liquid) = build_chunk_mesh(&w, 0, 0).unwrap();
+        for m in [&solid, &liquid] {
+            for q in m.verts.chunks_exact(4) {
+                let mut seen = [false; 4];
+                for v in q {
+                    seen[vertex_tile(v).1 as usize] = true;
+                }
+                assert_eq!(seen, [true; 4], "dörtgen köşe kodları bozuk: {q:?}");
+                assert!(q.iter().all(|v| vertex_tile(v).0 == vertex_tile(&q[0]).0));
+            }
+        }
     }
 
     #[test]
@@ -361,49 +458,82 @@ mod tests {
 
     #[test]
     fn buried_blocks_produce_no_faces() {
-        // Tamamen taşla çevrili bir blok hiç yüz üretmemeli.
-        let mut w = test_world(21);
-        w.generate_chunk(0, 0);
-        let (solid, _) = build_chunk_mesh(&w, 0, 0).unwrap();
         // Yüzeyin çok altındaki yüzler mesh'te olmamalı (y aralığı daraltıldı).
-        let mut min_y = f32::MAX;
-        for p in solid.pos.chunks_exact(3) {
-            min_y = min_y.min(p[1]);
-        }
+        let w = test_world(21);
+        let (solid, _) = build_chunk_mesh(&w, 0, 0).unwrap();
+        let min_y = ys(&solid).min().unwrap();
         let h_min = (-1..=CHUNK_SIZE)
             .flat_map(|x| (-1..=CHUNK_SIZE).map(move |z| (x, z)))
             .map(|(x, z)| w.height_at(x, z))
             .min()
             .unwrap();
         assert!(
-            min_y >= (h_min - 2) as f32,
+            min_y as i32 >= h_min - 2,
             "y aralığı daraltılmadı: en düşük yüz {min_y}, min yükseklik {h_min}"
         );
     }
 
+    /// Arazinin altına kazılan çukurun tabanı görünmeli. Eskiden y aralığı
+    /// gürültü yüksekliğinden hesaplandığı için taban mesh dışında kalıyor ve
+    /// çukura bakınca boşluk görünüyordu.
     #[test]
-    fn mesh_is_deterministic() {
-        let mut a = test_world(77);
-        let mut b = test_world(77);
-        a.generate_chunk(2, 2);
-        b.generate_chunk(2, 2);
-        let (ma, _) = build_chunk_mesh(&a, 2, 2).unwrap();
-        let (mb, _) = build_chunk_mesh(&b, 2, 2).unwrap();
-        assert_eq!(ma.pos, mb.pos);
-        assert_eq!(ma.idx, mb.idx);
-        assert_eq!(ma.col, mb.col);
+    fn deep_hole_floor_is_meshed() {
+        let mut w = test_world(20261012);
+        let (x, z) = (8, 8);
+        let h = w.height_at(x, z);
+        for y in (h - 6)..=h {
+            assert!(w.set_block_raw(x, y, z, AIR));
+        }
+        let floor_top = (h - 6) as u8; // tabandaki bloğun üst yüzü
+        let (solid, _) = build_chunk_mesh(&w, 0, 0).unwrap();
+        // Tabandaki bloğun üst yüzü: 4 köşesi de y = floor_top, x,z ∈ {8, 9}.
+        let found = solid.verts.chunks_exact(4).any(|q| {
+            q.iter().all(|v| {
+                let [px, py, pz] = vertex_pos(v);
+                py == floor_top && (8..=9).contains(&px) && (8..=9).contains(&pz)
+            })
+        });
+        assert!(found, "çukur tabanı (y={floor_top}) mesh'te yok");
     }
 
     #[test]
-    fn bounding_sphere_covers_geometry() {
-        let mut w = test_world(31);
-        w.generate_chunk(0, 0);
+    fn mesh_is_deterministic() {
+        let a = test_world(77);
+        let b = test_world(77);
+        let (ma, _) = build_chunk_mesh(&a, 2, 2).unwrap();
+        let (mb, _) = build_chunk_mesh(&b, 2, 2).unwrap();
+        assert_eq!(ma.verts, mb.verts);
+    }
+
+    /// `Mesher` tamponlarını korur: aynı chunk iki kez üretilince sonuç aynı,
+    /// ikinci üretimde de yeni ayırma gerekmez.
+    #[test]
+    fn mesher_reuses_buffers() {
+        let w = test_world(42);
+        let mut m = Mesher::new();
+        assert!(m.build(&w, 1, 1));
+        let first = m.solid.verts.clone();
+        let cap = m.solid.verts.capacity();
+        assert!(m.build(&w, 0, 0));
+        assert!(m.build(&w, 1, 1));
+        assert_eq!(m.solid.verts, first);
+        assert!(m.solid.verts.capacity() >= cap);
+        let (fresh, _) = build_chunk_mesh(&w, 1, 1).unwrap();
+        assert_eq!(fresh.verts, first);
+    }
+
+    #[test]
+    fn local_bounds_cover_geometry() {
+        let w = test_world(31);
         let (solid, _) = build_chunk_mesh(&w, 0, 0).unwrap();
-        let (c, r) = solid.bounding_sphere();
-        for p in solid.pos.chunks_exact(3) {
-            let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt();
-            assert!(d <= r + 1e-3, "kapsayıcı küre geometriyi kapsamıyor");
+        let (mn, mx) = solid.local_bounds().unwrap();
+        for v in &solid.verts {
+            let p = vertex_pos(v);
+            for a in 0..3 {
+                assert!(mn[a] <= p[a] && p[a] <= mx[a], "kutu geometriyi kapsamıyor");
+            }
         }
+        assert!(MeshData::default().local_bounds().is_none());
     }
 
     /// H1 regresyonu: ağaç yaprakları mesh'in `y` aralığının üstünde kalmamalı.
@@ -435,15 +565,10 @@ mod tests {
                 }
 
                 let (solid, liquid) = build_chunk_mesh(&w, cx, cz).expect("mesh üretilemedi");
-                let max_y = solid
-                    .pos
-                    .chunks_exact(3)
-                    .chain(liquid.pos.chunks_exact(3))
-                    .map(|p| p[1])
-                    .fold(f32::MIN, f32::max);
+                let max_y = ys(&solid).chain(ys(&liquid)).max().unwrap_or(0) as i32;
 
                 assert!(
-                    max_y >= (top + 1) as f32 - 1e-3,
+                    max_y > top,
                     "({cx},{cz}) ağaç tepesi mesh dışında: en yüksek blok y={top}, \
                      mesh üst sınırı y={max_y}"
                 );
@@ -477,23 +602,35 @@ mod tests {
 
         let (after, _) = build_chunk_mesh(&w, 0, 0).expect("mesh üretilemedi");
 
+        let colors = |m: &MeshData| m.verts.iter().map(|v| [v[4], v[5], v[6]]).collect::<Vec<_>>();
+        // AO köşegeni değişirse köşe sırası döner; konumları dörtgen başına
+        // sırasız karşılaştır.
+        let quads = |m: &MeshData| {
+            m.verts
+                .chunks_exact(4)
+                .map(|q| {
+                    let mut p: Vec<[u8; 3]> = q.iter().map(vertex_pos).collect();
+                    p.sort();
+                    p
+                })
+                .collect::<Vec<_>>()
+        };
         assert_ne!(
-            before.col, after.col,
+            colors(&before), colors(&after),
             "köşe AO'su çapraz komşuya bağlı olmalı: değişiklik mesh'e yansımadı"
         );
         assert_eq!(
-            before.pos, after.pos,
-            "yalnızca AO değişmeli; konumlar aynı kalmalı"
+            quads(&before), quads(&after),
+            "yalnızca AO değişmeli; yüzler aynı kalmalı"
         );
     }
 
     #[test]
     fn reset_clears_buffers() {
         let mut m = MeshData::default();
-        m.pos.push(1.0);
-        m.idx.push(0);
+        m.verts.push([0; 8]);
         m.reset();
-        assert!(m.is_empty() && m.pos.is_empty());
+        assert!(m.is_empty() && m.as_bytes().is_empty());
     }
 
     #[test]

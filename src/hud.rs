@@ -2,8 +2,28 @@
 //!
 //! Tüm arayüz (nişangah, kısayol çubuğu, can/açlık/nefes göstergeleri,
 //! bildirimler, envanter + çalışma tezgahı ekranı) WebGL tuvalinin üstündeki
-//! ikinci bir tuval üzerine çizilir. Yerleşim her karede hesaplanır ve aynı
-//! dikdörtgenler hem çizim hem de fare isabet testi için kullanılır.
+//! ikinci bir tuval üzerine çizilir. Yerleşim yalnızca pencere boyutu
+//! değişince hesaplanır ve aynı dikdörtgenler hem çizim hem de fare isabet
+//! testi için kullanılır.
+//!
+//! # Rust → Canvas2D sınırı
+//!
+//! Her Canvas2D çağrısı wasm → JS geçişidir ve stil atamaları her seferinde
+//! bir dize çözer. Bu yüzden:
+//!
+//! * **Değişmeyen kare çizilmez.** Ekrana çizilecek her şeyin (yuvalar, can
+//!   durumları, bildirim, ölçüm metni…) özeti alınır; özet aynıysa tuval
+//!   olduğu gibi kalır. Yalnızca ölçüm paneli değiştiyse yalnızca o bölge
+//!   yeniden çizilir.
+//! * **Can/açlık/nefes ikonları önceden çizilir.** Her ikon eskiden ~40
+//!   `fillStyle` + `fillRect` çağrısıydı; şimdi hazır bir sprite'tan tek
+//!   `drawImage`.
+//! * **Stil önbelleği.** Aynı `fillStyle`/`font`/hizalama tekrar atanmaz.
+
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
@@ -49,10 +69,96 @@ pub struct Layout {
 pub struct Hud {
     ctx: CanvasRenderingContext2d,
     atlas: HtmlCanvasElement,
+    /// Önceden çizilmiş can/açlık/nefes ikonları (bkz. [`make_vitals_sprites`]).
+    sprites: HtmlCanvasElement,
     pub width: f64,
     pub height: f64,
     toast: Option<(String, f64)>,
     pub layout: Option<Layout>,
+    /// Son çizilen karenin özeti (ölçüm paneli hariç) ve ölçüm panelinin özeti.
+    drawn_main: Option<u64>,
+    drawn_debug: Option<u64>,
+    /// Ölçüm paneli satırları (yeniden kullanılan dizeler).
+    debug_lines: [String; DEBUG_LINES],
+    style: RefCell<StyleCache>,
+}
+
+/// Bağlamda son atanan stiller. Tuval boyutu değişince bağlam durumu
+/// sıfırlandığı için önbellek de sıfırlanır.
+struct StyleCache {
+    fill: String,
+    stroke: String,
+    font: String,
+    align: &'static str,
+    baseline: &'static str,
+    line_width: f64,
+}
+
+impl Default for StyleCache {
+    fn default() -> Self {
+        Self {
+            fill: String::new(),
+            stroke: String::new(),
+            font: String::new(),
+            align: "",
+            baseline: "",
+            line_width: f64::NAN,
+        }
+    }
+}
+
+const DEBUG_LINES: usize = 8;
+const DEBUG_KEYS: [&str; DEBUG_LINES] = ["FPS", "Konum", "Bölge", "Mesafe", "Çizim", "Mod", "Oyun", "El"];
+/// Ölçüm panelinin kapladığı bölge (kısmi yeniden çizim için).
+const DEBUG_RECT: Rect = Rect { x: 0.0, y: 0.0, w: 340.0, h: 16.0 + DEBUG_LINES as f64 * 17.0 + 4.0 };
+
+/// Can/açlık/nefes ikon boyutu ve sprite hücresi (taşma payıyla).
+const VITAL_ICON: f64 = 18.0;
+const SPRITE_W: f64 = 19.0;
+const SPRITE_H: f64 = 17.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Vital {
+    Heart = 0,
+    Food = 1,
+    Air = 2,
+}
+
+/// İkonun doluluk durumu (sprite sütunu).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Fill {
+    Full = 0,
+    Half = 1,
+    Empty = 2,
+}
+
+impl Fill {
+    fn of(value: f64) -> Self {
+        if value >= 1.0 {
+            Fill::Full
+        } else if value > 0.0 {
+            Fill::Half
+        } else {
+            Fill::Empty
+        }
+    }
+}
+
+/// Ekrandaki 10'ar ikonun durumu — hem çizim hem de kare özeti bundan çıkar.
+fn vital_states(s: &Survival) -> ([Fill; 10], [Fill; 10], Option<[Fill; 10]>) {
+    let hearts = std::array::from_fn(|i| Fill::of((s.health as f64 - i as f64 * 2.0) / 2.0));
+    let food = std::array::from_fn(|i| Fill::of((s.hunger as f64 - i as f64 * 2.0) / 2.0));
+    // Nefes yalnızca su altındayken görünür.
+    let air = (s.air < MAX_AIR - 0.01).then(|| {
+        let step = MAX_AIR / 10.0;
+        std::array::from_fn(|i| Fill::of((s.air - i as f64 * step) / step))
+    });
+    (hearts, food, air)
+}
+
+/// 0..1 değeri 1/255 adımlarla nicemlenir: özet ve çizim aynı değeri kullanır.
+fn quantize(v: f64) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Piksel sanatı ikonlar (9×8). `1` ana renk, `2` koyu kenar.
@@ -71,23 +177,33 @@ const AIR_PX: [&str; 8] = [
 
 /// Atlası bir `ImageData`'dan çevrimdışı tuvale kopyalar; böylece ikonlar
 /// `drawImage` ile hızlıca çizilebilir.
-fn make_atlas_canvas(document: &web_sys::Document) -> Result<HtmlCanvasElement, String> {
+fn offscreen_canvas(
+    document: &web_sys::Document,
+    w: u32,
+    h: u32,
+) -> Result<(HtmlCanvasElement, CanvasRenderingContext2d), String> {
     let canvas = document
         .create_element("canvas")
         .map_err(|_| "tuval oluşturulamadı")?
         .dyn_into::<HtmlCanvasElement>()
         .map_err(|_| "tuval dönüştürülemedi")?;
-    canvas.set_width(ATLAS_W as u32);
-    canvas.set_height(ATLAS_H as u32);
+    canvas.set_width(w);
+    canvas.set_height(h);
     let ctx = canvas
         .get_context("2d")
         .map_err(|_| "2d bağlamı alınamadı")?
         .ok_or("2d bağlamı yok")?
         .dyn_into::<CanvasRenderingContext2d>()
         .map_err(|_| "2d bağlamı dönüştürülemedi")?;
+    Ok((canvas, ctx))
+}
 
-    let pixels = crate::atlas::build_atlas();
-    let clamped = wasm_bindgen::Clamped(pixels.as_slice());
+/// Atlası bir `ImageData`'dan çevrimdışı tuvale kopyalar; böylece ikonlar
+/// `drawImage` ile hızlıca çizilebilir. Pikseller GL çiziciyle paylaşılır
+/// (atlas yalnızca bir kez üretilir).
+fn make_atlas_canvas(document: &web_sys::Document, pixels: &[u8]) -> Result<HtmlCanvasElement, String> {
+    let (canvas, ctx) = offscreen_canvas(document, ATLAS_W as u32, ATLAS_H as u32)?;
+    let clamped = wasm_bindgen::Clamped(pixels);
     let img = ImageData::new_with_u8_clamped_array_and_sh(clamped, ATLAS_W as u32, ATLAS_H as u32)
         .map_err(|_| "ImageData oluşturulamadı")?;
     ctx.put_image_data(&img, 0.0, 0.0)
@@ -95,28 +211,83 @@ fn make_atlas_canvas(document: &web_sys::Document) -> Result<HtmlCanvasElement, 
     Ok(canvas)
 }
 
+/// Can/açlık/nefes ikonlarını tüm doluluk durumlarıyla (dolu, yarım, boş)
+/// bir kez çizer: satır = [`Vital`], sütun = [`Fill`].
+fn make_vitals_sprites(document: &web_sys::Document) -> Result<HtmlCanvasElement, String> {
+    let (canvas, ctx) = offscreen_canvas(document, (SPRITE_W * 3.0) as u32, (SPRITE_H * 3.0) as u32)?;
+    let kinds: [(&[&str; 8], &str, &str); 3] = [
+        (&HEART_PX, "#e2453e", "#5d1714"),
+        (&FOOD_PX, "#c8763a", "#6b3a15"),
+        (&AIR_PX, "#9fd8f5", "#3d7fa6"),
+    ];
+    let (empty_fill, empty_dark) = ("#3c3c3c", "#232323");
+    let px = VITAL_ICON / 9.0;
+    for (row, (bmp, fill, dark)) in kinds.iter().enumerate() {
+        for (col, value) in [1.0, 0.5, 0.0].into_iter().enumerate() {
+            let (x, y) = (col as f64 * SPRITE_W, row as f64 * SPRITE_H);
+            let half = value > 0.0 && value < 1.0;
+            for (ry, line) in bmp.iter().enumerate() {
+                for (rx, ch) in line.chars().enumerate() {
+                    if ch == '0' {
+                        continue;
+                    }
+                    let empty = value <= 0.0 || (half && rx >= 5);
+                    let color = match (empty, ch == '2') {
+                        (true, true) => empty_dark,
+                        (true, false) => empty_fill,
+                        (false, true) => *dark,
+                        (false, false) => *fill,
+                    };
+                    ctx.set_fill_style_str(color);
+                    ctx.fill_rect(x + rx as f64 * px, y + ry as f64 * px, px + 0.4, px + 0.4);
+                }
+            }
+        }
+    }
+    Ok(canvas)
+}
+
 impl Hud {
-    pub fn new(canvas: &HtmlCanvasElement, document: &web_sys::Document) -> Result<Self, String> {
+    pub fn new(
+        canvas: &HtmlCanvasElement,
+        document: &web_sys::Document,
+        atlas_pixels: &[u8],
+    ) -> Result<Self, String> {
         let ctx = canvas
             .get_context("2d")
             .map_err(|_| "2d bağlamı alınamadı")?
             .ok_or("2d bağlamı yok")?
             .dyn_into::<CanvasRenderingContext2d>()
             .map_err(|_| "2d bağlamı dönüştürülemedi")?;
-        let atlas = make_atlas_canvas(document)?;
-        Ok(Self {
+        let atlas = make_atlas_canvas(document, atlas_pixels)?;
+        let sprites = make_vitals_sprites(document)?;
+        let mut hud = Self {
             ctx,
             atlas,
+            sprites,
             width: 1.0,
             height: 1.0,
             toast: None,
             layout: None,
-        })
+            drawn_main: None,
+            drawn_debug: None,
+            debug_lines: Default::default(),
+            style: RefCell::new(StyleCache::default()),
+        };
+        hud.resize(1.0, 1.0);
+        Ok(hud)
     }
 
+    /// Tuval boyutu değiştikten **sonra** çağrılır: yerleşim yeniden
+    /// hesaplanır; tuval temizlendiği ve bağlam durumu sıfırlandığı için
+    /// sonraki karede her şey yeniden çizilir.
     pub fn resize(&mut self, w: f64, h: f64) {
         self.width = w;
         self.height = h;
+        self.layout = Some(self.compute_layout());
+        self.drawn_main = None;
+        self.drawn_debug = None;
+        *self.style.borrow_mut() = StyleCache::default();
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -138,11 +309,60 @@ impl Hud {
         let _ = ctx.round_rect_with_f64(r.x, r.y, r.w, r.h, radius);
     }
 
+    // --- önbellekli stil atamaları (aynı değer tekrar gönderilmez) ---
+
+    fn fill(&self, color: &str) {
+        let mut st = self.style.borrow_mut();
+        if st.fill != color {
+            self.ctx.set_fill_style_str(color);
+            st.fill.clear();
+            st.fill.push_str(color);
+        }
+    }
+
+    fn stroke(&self, color: &str) {
+        let mut st = self.style.borrow_mut();
+        if st.stroke != color {
+            self.ctx.set_stroke_style_str(color);
+            st.stroke.clear();
+            st.stroke.push_str(color);
+        }
+    }
+
+    fn line_width(&self, w: f64) {
+        let mut st = self.style.borrow_mut();
+        if st.line_width != w {
+            self.ctx.set_line_width(w);
+            st.line_width = w;
+        }
+    }
+
+    fn font(&self, font: &str) {
+        let mut st = self.style.borrow_mut();
+        if st.font != font {
+            self.ctx.set_font(font);
+            st.font.clear();
+            st.font.push_str(font);
+        }
+    }
+
+    fn text_layout(&self, align: &'static str, baseline: &'static str) {
+        let mut st = self.style.borrow_mut();
+        if st.align != align {
+            self.ctx.set_text_align(align);
+            st.align = align;
+        }
+        if st.baseline != baseline {
+            self.ctx.set_text_baseline(baseline);
+            st.baseline = baseline;
+        }
+    }
+
     // ---------------------------------------------------------------
     // Yerleşim
     // ---------------------------------------------------------------
 
-    pub fn compute_layout(&self, inv_open: bool) -> Layout {
+    pub fn compute_layout(&self) -> Layout {
         let (w, h) = (self.width, self.height);
         let gap = 5.0;
         let slot = 52.0;
@@ -156,7 +376,7 @@ impl Hud {
             .collect();
 
         // --- Can / açlık / nefes ---
-        let icon = 18.0;
+        let icon = VITAL_ICON;
         let bar_w = 10.0 * (icon + 1.0);
         let vitals_hearts = Rect { x: hb_x, y: hb_y - 24.0, w: bar_w, h: icon };
         let vitals_air = Rect { x: hb_x, y: hb_y - 24.0 - icon - 3.0, w: bar_w, h: icon };
@@ -252,7 +472,6 @@ impl Hud {
         let close_btn = Rect { x: px + panel_w - pad - 108.0, y: btn_y, w: 108.0, h: 30.0 };
         let clear_btn = Rect { x: close_btn.x - 12.0 - 130.0, y: btn_y, w: 130.0, h: 30.0 };
 
-        let _ = inv_open;
         Layout {
             hotbar,
             craft,
@@ -295,7 +514,7 @@ impl Hud {
                 // Çapraz ahşap çubuk.
                 let step = size / 8.0;
                 for i in 0..8 {
-                    ctx.set_fill_style_str(if i % 2 == 0 { "#b98f52" } else { "#7d5c2f" });
+                    self.fill(if i % 2 == 0 { "#b98f52" } else { "#7d5c2f" });
                     ctx.fill_rect(
                         x + size * 0.18 + i as f64 * step,
                         y + size * 0.78 - i as f64 * step,
@@ -306,17 +525,17 @@ impl Hud {
             }
             Icon::Elma => {
                 // Sap + yaprak + gövde.
-                ctx.set_fill_style_str("#7a4a1c");
+                self.fill("#7a4a1c");
                 ctx.fill_rect(x + size * 0.46, y + size * 0.06, size * 0.12, size * 0.18);
-                ctx.set_fill_style_str("#4f9c3c");
+                self.fill("#4f9c3c");
                 ctx.fill_rect(x + size * 0.58, y + size * 0.12, size * 0.26, size * 0.12);
-                ctx.set_fill_style_str("#b8352c");
+                self.fill("#b8352c");
                 ctx.begin_path();
                 let _ = ctx.arc(x + size * 0.36, y + size * 0.62, size * 0.28, 0.0, std::f64::consts::TAU);
                 let _ = ctx.arc(x + size * 0.66, y + size * 0.62, size * 0.28, 0.0, std::f64::consts::TAU);
                 ctx.fill();
                 ctx.fill_rect(x + size * 0.32, y + size * 0.34, size * 0.38, size * 0.56);
-                ctx.set_fill_style_str("#e2564a");
+                self.fill("#e2564a");
                 ctx.fill_rect(x + size * 0.26, y + size * 0.40, size * 0.16, size * 0.26);
             }
         }
@@ -324,59 +543,56 @@ impl Hud {
 
     fn slot(&self, r: Rect, stack: Option<Stack>, highlight: bool, index_label: Option<usize>) {
         let ctx = &self.ctx;
-        ctx.set_fill_style_str(if highlight {
+        self.fill(if highlight {
             "rgba(255,255,255,0.20)"
         } else if stack.is_some() {
             "rgba(255,255,255,0.13)"
         } else {
             "rgba(255,255,255,0.07)"
         });
+        // Aynı yol hem doldurulur hem çizilir (iki kez kurmaya gerek yok).
         self.rounded(r, 7.0);
         ctx.fill();
 
-        ctx.set_stroke_style_str(if highlight { "#ffffff" } else { "rgba(255,255,255,0.22)" });
-        ctx.set_line_width(if highlight { 2.5 } else { 2.0 });
-        self.rounded(r, 7.0);
+        self.stroke(if highlight { "#ffffff" } else { "rgba(255,255,255,0.22)" });
+        self.line_width(if highlight { 2.5 } else { 2.0 });
         ctx.stroke();
 
         if let Some(label) = index_label {
-            ctx.set_fill_style_str("rgba(255,255,255,0.75)");
-            ctx.set_font("10px 'Segoe UI', sans-serif");
-            ctx.set_text_align("left");
-            ctx.set_text_baseline("top");
-            let _ = ctx.fill_text(&(label + 1).to_string(), r.x + 5.0, r.y + 3.0);
+            self.fill("rgba(255,255,255,0.75)");
+            self.font("10px 'Segoe UI', sans-serif");
+            self.text_layout("left", "top");
+            let _ = ctx.fill_text(DIGITS[(label + 1) % 10], r.x + 5.0, r.y + 3.0);
         }
 
         if let Some(s) = stack {
             let pad = r.w * 0.14;
             self.draw_icon(s.id, r.x + pad, r.y + pad, r.w - pad * 2.0);
             if s.count > 1 {
-                ctx.set_fill_style_str("#ffffff");
-                ctx.set_font("700 12.5px 'Segoe UI', sans-serif");
-                ctx.set_text_align("right");
-                ctx.set_text_baseline("bottom");
+                self.fill("#ffffff");
+                self.font("700 12.5px 'Segoe UI', sans-serif");
+                self.text_layout("right", "bottom");
                 let _ = ctx.fill_text(&s.count.to_string(), r.x + r.w - 4.0, r.y + r.h - 2.0);
             }
         }
     }
 
-    fn label(&self, text: &str, x: f64, y: f64, size: f64, color: &str, align: &str) {
-        let ctx = &self.ctx;
-        ctx.set_fill_style_str(color);
-        ctx.set_font(&format!("600 {size}px 'Segoe UI', sans-serif"));
-        ctx.set_text_align(align);
-        ctx.set_text_baseline("middle");
-        let _ = ctx.fill_text(text, x, y);
+    fn label(&self, text: &str, x: f64, y: f64, size: f64, color: &str, align: &'static str) {
+        self.fill(color);
+        let mut font = String::with_capacity(40);
+        let _ = write!(font, "600 {size}px 'Segoe UI', sans-serif");
+        self.font(&font);
+        self.text_layout(align, "middle");
+        let _ = self.ctx.fill_text(text, x, y);
     }
 
     fn panel_box(&self, r: Rect, fill: &str, stroke: &str, radius: f64) {
         let ctx = &self.ctx;
-        ctx.set_fill_style_str(fill);
+        self.fill(fill);
         self.rounded(r, radius);
         ctx.fill();
-        ctx.set_stroke_style_str(stroke);
-        ctx.set_line_width(1.0);
-        self.rounded(r, radius);
+        self.stroke(stroke);
+        self.line_width(1.0);
         ctx.stroke();
     }
 
@@ -397,91 +613,35 @@ impl Hud {
         );
     }
 
-    /// Piksel ikon çizer; `value` 0..max arasında o ikonun doluluk oranını verir.
-    fn pixel_icon(
-        &self,
-        bmp: &[&str; 8],
-        x: f64,
-        y: f64,
-        size: f64,
-        fill: &str,
-        dark: &str,
-        empty_fill: &str,
-        empty_dark: &str,
-        value: f64,
-    ) {
-        let ctx = &self.ctx;
-        let px = size / 9.0;
-        let half = value > 0.0 && value < 1.0;
-        for (ry, row) in bmp.iter().enumerate() {
-            for (rx, ch) in row.chars().enumerate() {
-                if ch == '0' {
-                    continue;
-                }
-                let empty = value <= 0.0 || (half && rx >= 5);
-                let color = if empty {
-                    if ch == '2' { empty_dark } else { empty_fill }
-                } else if ch == '2' {
-                    dark
-                } else {
-                    fill
-                };
-                ctx.set_fill_style_str(color);
-                ctx.fill_rect(x + rx as f64 * px, y + ry as f64 * px, px + 0.4, px + 0.4);
-            }
-        }
+    /// Önceden çizilmiş ikonu tek `drawImage` ile kopyalar (1:1, tam piksel).
+    fn vital_icon(&self, kind: Vital, fill: Fill, x: f64, y: f64) {
+        let _ = self
+            .ctx
+            .draw_image_with_html_canvas_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+                &self.sprites,
+                fill as u8 as f64 * SPRITE_W,
+                kind as u8 as f64 * SPRITE_H,
+                SPRITE_W,
+                SPRITE_H,
+                x.round(),
+                y.round(),
+                SPRITE_W,
+                SPRITE_H,
+            );
     }
 
     fn draw_vitals(&self, s: &Survival, l: &Layout) {
         if !s.vitals_visible() {
             return;
         }
-        let icon = l.vitals_hearts.h;
-        let per = icon + 1.0;
-
+        let per = l.vitals_hearts.h + 1.0;
+        let (hearts, food, air) = vital_states(s);
         for i in 0..10 {
-            let v = (s.health as f64 - i as f64 * 2.0) / 2.0;
-            self.pixel_icon(
-                &HEART_PX,
-                l.vitals_hearts.x + i as f64 * per,
-                l.vitals_hearts.y,
-                icon,
-                "#e2453e",
-                "#5d1714",
-                "#3c3c3c",
-                "#232323",
-                v,
-            );
-        }
-        for i in 0..10 {
-            let v = (s.hunger as f64 - i as f64 * 2.0) / 2.0;
-            self.pixel_icon(
-                &FOOD_PX,
-                l.vitals_hunger.x + i as f64 * per,
-                l.vitals_hunger.y,
-                icon,
-                "#c8763a",
-                "#6b3a15",
-                "#3c3c3c",
-                "#232323",
-                v,
-            );
-        }
-        // Nefes yalnızca su altındayken görünür.
-        if s.air < MAX_AIR - 0.01 {
-            for i in 0..10 {
-                let v = (s.air - i as f64 * (MAX_AIR / 10.0)) / (MAX_AIR / 10.0);
-                self.pixel_icon(
-                    &AIR_PX,
-                    l.vitals_air.x + i as f64 * per,
-                    l.vitals_air.y,
-                    icon,
-                    "#9fd8f5",
-                    "#3d7fa6",
-                    "#3c3c3c",
-                    "#232323",
-                    v,
-                );
+            let dx = i as f64 * per;
+            self.vital_icon(Vital::Heart, hearts[i], l.vitals_hearts.x + dx, l.vitals_hearts.y);
+            self.vital_icon(Vital::Food, food[i], l.vitals_hunger.x + dx, l.vitals_hunger.y);
+            if let Some(air) = &air {
+                self.vital_icon(Vital::Air, air[i], l.vitals_air.x + dx, l.vitals_air.y);
             }
         }
     }
@@ -489,16 +649,22 @@ impl Hud {
     fn draw_crosshair(&self) {
         let ctx = &self.ctx;
         let (cx, cy) = (self.width / 2.0, self.height / 2.0);
-        ctx.set_fill_style_str("rgba(255,255,255,0.9)");
+        self.fill("rgba(255,255,255,0.9)");
         ctx.fill_rect(cx - 1.0, cy - 10.0, 2.0, 7.0);
         ctx.fill_rect(cx - 1.0, cy + 3.0, 2.0, 7.0);
         ctx.fill_rect(cx - 10.0, cy - 1.0, 7.0, 2.0);
         ctx.fill_rect(cx + 3.0, cy - 1.0, 7.0, 2.0);
     }
 
+    /// Bildirimin nicemlenmiş saydamlığı (özet ve çizim aynı değeri kullanır).
+    fn toast_alpha(&self) -> Option<(&str, u8)> {
+        let (text, life) = self.toast.as_ref()?;
+        Some((text.as_str(), quantize(life / 0.4)))
+    }
+
     fn draw_toast(&self) {
-        let Some((text, life)) = self.toast.as_ref() else { return };
-        let alpha = (life / 0.4).min(1.0);
+        let Some((text, alpha)) = self.toast_alpha() else { return };
+        let alpha = alpha as f64 / 255.0;
         let ctx = &self.ctx;
         let w = text.chars().count() as f64 * 8.0 + 34.0;
         let h = 30.0;
@@ -515,37 +681,37 @@ impl Hud {
         ctx.set_global_alpha(1.0);
     }
 
+    /// Ölçüm paneli satırlarını yeniden kullanılan dizelere yazar ve özetini
+    /// döndürür (ayırma yok; metin aynıysa panel yeniden çizilmez).
+    fn format_debug(&mut self, d: &DebugInfo) -> u64 {
+        let l = &mut self.debug_lines;
+        for line in l.iter_mut() {
+            line.clear();
+        }
+        let _ = write!(l[0], "{}", d.fps);
+        let _ = write!(l[1], "{:.0}, {:.0}, {:.0}", d.pos[0], d.pos[1], d.pos[2]);
+        let _ = write!(l[2], "{} yüklü", d.chunks);
+        let _ = write!(l[3], "{} bölge", d.render_dist);
+        let _ = write!(l[4], "{} · {:.0}k üçgen", d.draws, d.tris as f64 / 1000.0);
+        l[5].push_str(d.fly_label);
+        l[6].push_str(d.mode_label);
+        match d.hand {
+            Some(s) => {
+                let _ = write!(l[7], "{} ×{}", item_name(s.id), s.count);
+            }
+            None => l[7].push_str("Boş"),
+        }
+        let mut h = DefaultHasher::new();
+        l.hash(&mut h);
+        h.finish()
+    }
+
     /// Sağ üstteki ölçüm paneli.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_debug(
-        &self,
-        fps: u32,
-        pos: [f64; 3],
-        chunks: usize,
-        draws: u32,
-        tris: u32,
-        render_dist: i32,
-        mode_label: &str,
-        fly_label: &str,
-        hand: &str,
-    ) {
+    fn draw_debug(&self) {
         let ctx = &self.ctx;
-        let lines = [
-            ("FPS", fps.to_string()),
-            (
-                "Konum",
-                format!("{:.0}, {:.0}, {:.0}", pos[0], pos[1], pos[2]),
-            ),
-            ("Bölge", format!("{chunks} yüklü")),
-            ("Mesafe", format!("{render_dist} bölge")),
-            ("Çizim", format!("{draws} · {:.0}k üçgen", tris as f64 / 1000.0)),
-            ("Mod", fly_label.to_string()),
-            ("Oyun", mode_label.to_string()),
-            ("El", hand.to_string()),
-        ];
         let x = 12.0;
         let mut y = 16.0;
-        for (k, v) in lines.iter() {
+        for (k, v) in DEBUG_KEYS.iter().zip(self.debug_lines.iter()) {
             ctx.set_global_alpha(0.6);
             self.label(k, x, y, 12.5, "#ffffff", "left");
             ctx.set_global_alpha(1.0);
@@ -558,6 +724,39 @@ impl Hud {
     // Ana çizim
     // ---------------------------------------------------------------
 
+    /// Ölçüm paneli dışında ekrana çizilecek her şeyin özeti.
+    #[allow(clippy::too_many_arguments)]
+    fn main_key(
+        &self,
+        inv_open: bool,
+        inv: &Inventory,
+        grid: &Grid,
+        survival: &Survival,
+        held: Option<Stack>,
+        mouse: (f64, f64),
+        hud_visible: bool,
+    ) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.width.to_bits().hash(&mut h);
+        self.height.to_bits().hash(&mut h);
+        (inv_open, hud_visible, survival.dead).hash(&mut h);
+        inv.slots.hash(&mut h);
+        inv.selected.hash(&mut h);
+        grid.hash(&mut h);
+        survival.vitals_visible().hash(&mut h);
+        vital_states(survival).hash(&mut h);
+        quantize(survival.hurt_flash * 0.6).hash(&mut h);
+        self.toast_alpha().hash(&mut h);
+        held.hash(&mut h);
+        if held.is_some() {
+            // Taşınan yığın fareyi izler.
+            mouse.0.to_bits().hash(&mut h);
+            mouse.1.to_bits().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Arayüzü çizer — yalnızca ekranda bir şey değiştiyse.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -570,13 +769,41 @@ impl Hud {
         hud_visible: bool,
         debug: Option<DebugInfo>,
     ) {
+        let show_debug = !inv_open && hud_visible && debug.is_some();
+        let debug_key = match &debug {
+            Some(d) if show_debug => Some(self.format_debug(d)),
+            _ => None,
+        };
+        let main_key = self.main_key(inv_open, inv, grid, survival, held, mouse, hud_visible);
+
+        if self.drawn_main == Some(main_key) {
+            if self.drawn_debug == debug_key {
+                return; // hiçbir şey değişmedi: tuval olduğu gibi kalır
+            }
+            // Yalnızca ölçüm paneli değişti. Panel bölgesinin altında başka
+            // bir şey yoksa yalnızca o bölge yeniden çizilir.
+            let overlays = survival.dead || quantize(survival.hurt_flash * 0.6) > 0;
+            let room = self.height > 420.0 && self.width > DEBUG_RECT.w + 20.0;
+            // Fareyi izleyen yığın panelin üstünde olabilir; o zaman tam çizim.
+            if show_debug && !overlays && room && held.is_none() && self.drawn_debug.is_some() {
+                let r = DEBUG_RECT;
+                self.ctx.clear_rect(r.x, r.y, r.w, r.h);
+                self.draw_debug();
+                self.drawn_debug = debug_key;
+                return;
+            }
+        }
+        self.drawn_main = Some(main_key);
+        self.drawn_debug = debug_key;
+
         let ctx = &self.ctx;
         ctx.clear_rect(0.0, 0.0, self.width, self.height);
-        let l = self.compute_layout(inv_open);
+        let Some(l) = self.layout.as_ref() else { return };
 
         // Hasar aldığında kırmızı vinyet.
-        if survival.hurt_flash > 0.001 {
-            let a = survival.hurt_flash * 0.6;
+        let hurt = quantize(survival.hurt_flash * 0.6);
+        if hurt > 0 {
+            let a = hurt as f64 / 255.0;
             let g = ctx
                 .create_radial_gradient(
                     self.width / 2.0,
@@ -591,31 +818,29 @@ impl Hud {
                 let _ = g.add_color_stop(0.0, "rgba(180,16,16,0)");
                 let _ = g.add_color_stop(1.0, &format!("rgba(180,16,16,{a})"));
                 ctx.set_fill_style_canvas_gradient(&g);
+                self.style.borrow_mut().fill.clear(); // önbellek artık geçersiz
                 ctx.fill_rect(0.0, 0.0, self.width, self.height);
             }
         }
 
         if inv_open {
-            self.draw_inventory(inv, grid, held, mouse, &l);
+            self.draw_inventory(inv, grid, l);
         } else {
             if hud_visible {
                 self.draw_crosshair();
                 for (i, r) in l.hotbar.iter().enumerate() {
                     self.slot(*r, inv.slots[i], i == inv.selected, Some(i));
                 }
-                self.draw_vitals(survival, &l);
-                if let Some(d) = &debug {
-                    self.draw_debug(
-                        d.fps, d.pos, d.chunks, d.draws, d.tris, d.render_dist,
-                        &d.mode_label, &d.fly_label, &d.hand,
-                    );
+                self.draw_vitals(survival, l);
+                if show_debug {
+                    self.draw_debug();
                 }
             }
             self.draw_toast();
         }
 
         if survival.dead {
-            ctx.set_fill_style_str("rgba(72,0,0,0.55)");
+            self.fill("rgba(72,0,0,0.55)");
             ctx.fill_rect(0.0, 0.0, self.width, self.height);
             self.label(
                 "ÖLDÜN",
@@ -641,20 +866,11 @@ impl Hud {
                 );
             }
         }
-
-        self.layout = Some(l);
     }
 
-    fn draw_inventory(
-        &self,
-        inv: &Inventory,
-        grid: &Grid,
-        held: Option<Stack>,
-        mouse: (f64, f64),
-        l: &Layout,
-    ) {
+    fn draw_inventory(&self, inv: &Inventory, grid: &Grid, l: &Layout) {
         let ctx = &self.ctx;
-        ctx.set_fill_style_str("rgba(6,8,12,0.58)");
+        self.fill("rgba(6,8,12,0.58)");
         ctx.fill_rect(0.0, 0.0, self.width, self.height);
 
         self.panel_box(l.panel, "rgba(18,22,31,0.97)", "rgba(255,255,255,0.14)", 14.0);
@@ -772,8 +988,6 @@ impl Hud {
 
         self.button(l.clear_btn, "Tezgahı boşalt", false);
         self.button(l.close_btn, "Kapat (E)", true);
-
-        let _ = (held, mouse);
     }
 
     // ---------------------------------------------------------------
@@ -825,7 +1039,7 @@ impl Hud {
     }
 }
 
-/// HUD'a aktarılan ölçüm bilgileri.
+/// HUD'a aktarılan ölçüm bilgileri (kare başına dize ayırmadan).
 pub struct DebugInfo {
     pub fps: u32,
     pub pos: [f64; 3],
@@ -833,7 +1047,10 @@ pub struct DebugInfo {
     pub draws: u32,
     pub tris: u32,
     pub render_dist: i32,
-    pub mode_label: String,
-    pub fly_label: String,
-    pub hand: String,
+    pub mode_label: &'static str,
+    pub fly_label: &'static str,
+    pub hand: Option<Stack>,
 }
+
+/// Kısayol numaraları (kare başına `to_string` ayırması olmasın).
+const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];

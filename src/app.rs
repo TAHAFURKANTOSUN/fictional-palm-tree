@@ -45,6 +45,8 @@ struct Game {
     held: Option<Stack>,
 
     renderer: Renderer,
+    /// Yeniden kullanılan mesh tamponları (kararlı durumda ayırma yok).
+    mesher: mesh::Mesher,
     hud: Hud,
     window: Window,
     document: Document,
@@ -88,11 +90,14 @@ struct Game {
     started: bool,
 }
 
+thread_local! {
+    /// `performance` nesnesi bir kez alınır; her ölçümde `window()` +
+    /// `performance()` için JS'e gidip yeni tutamaç oluşturulmaz.
+    static PERF: Option<web_sys::Performance> = web_sys::window().and_then(|w| w.performance());
+}
+
 fn now_ms() -> f64 {
-    web_sys::window()
-        .and_then(|w| w.performance())
-        .map(|p| p.now())
-        .unwrap_or(0.0)
+    PERF.with(|p| p.as_ref().map(|p| p.now()).unwrap_or(0.0))
 }
 
 impl Game {
@@ -158,6 +163,21 @@ impl Game {
         }
     }
 
+    /// Chunk'ın mesh'ini üretip GPU'ya yükler. Komşuları eksikse `false`.
+    fn mesh_chunk(&mut self, cx: i32, cz: i32) -> bool {
+        if !self.mesher.build(&self.world, cx, cz) {
+            return false;
+        }
+        let key = ckey(cx, cz);
+        let (solid, liquid) = (&self.mesher.solid, &self.mesher.liquid);
+        if let Some(ch) = self.world.chunks.get_mut(&key) {
+            ch.meshed = true;
+            ch.faces = solid.face_count() + liquid.face_count();
+        }
+        self.renderer.upload_chunk(key, cx, cz, solid, liquid);
+        true
+    }
+
     /// Kare başına sınırlı iş: veri üretimi ve mesh kurulumu.
     fn update_chunks(&mut self) {
         let pcx = (self.player.pos[0] / CHUNK_SIZE as f64).floor() as i32;
@@ -173,46 +193,41 @@ impl Game {
 
         let t0 = now_ms();
 
+        // Bütçe her iş biriminden sonra denetlenir (`now_ms` artık ucuz);
+        // eskiden 8 chunk üretimi / 4 mesh'te bir bakıldığı için akış
+        // sırasında kareler bütçeyi katlarca aşabiliyordu.
+
         // 1) Veri üretimi (görüş + 1 halka)
-        let mut it = 0;
         while self.data_idx < self.want_data.len() {
             let (cx, cz, _) = self.want_data[self.data_idx];
             self.data_idx += 1;
             if !self.world.chunks.contains_key(&ckey(cx, cz)) {
                 self.world.generate_chunk(cx, cz);
-            }
-            it += 1;
-            if it & 7 == 0 && now_ms() - t0 > WORK_BUDGET_MS {
-                return;
+                if now_ms() - t0 > WORK_BUDGET_MS {
+                    return;
+                }
             }
         }
 
         // 2) Mesh üretimi — 8 komşusu hazır olanlar
-        let mut it = 0;
         while self.mesh_idx < self.want_mesh.len() {
             let (cx, cz, _) = self.want_mesh[self.mesh_idx];
-            let key = ckey(cx, cz);
             let needs_mesh = self
                 .world
                 .chunks
-                .get(&key)
+                .get(&ckey(cx, cz))
                 .map(|c| !c.meshed)
                 .unwrap_or(false);
             if needs_mesh {
-                if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, cx, cz) {
-                    if let Some(ch) = self.world.chunks.get_mut(&key) {
-                        ch.meshed = true;
-                        ch.faces = solid.face_count() + liquid.face_count();
-                    }
-                    self.renderer.upload_chunk(key, &solid, &liquid);
-                } else {
+                if !self.mesh_chunk(cx, cz) {
                     return; // komşu eksik: sonraki karede tekrar dene
                 }
-            }
-            self.mesh_idx += 1;
-            it += 1;
-            if it & 3 == 0 && now_ms() - t0 > WORK_BUDGET_MS {
-                return;
+                self.mesh_idx += 1;
+                if now_ms() - t0 > WORK_BUDGET_MS {
+                    return;
+                }
+            } else {
+                self.mesh_idx += 1;
             }
         }
     }
@@ -228,15 +243,8 @@ impl Game {
         }
         while self.mesh_idx < self.want_mesh.len() && now_ms() - t0 < 12.0 {
             let (cx, cz, _) = self.want_mesh[self.mesh_idx];
-            let key = ckey(cx, cz);
-            if self.world.chunks.get(&key).map(|c| !c.meshed).unwrap_or(false) {
-                if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, cx, cz) {
-                    if let Some(ch) = self.world.chunks.get_mut(&key) {
-                        ch.meshed = true;
-                        ch.faces = solid.face_count() + liquid.face_count();
-                    }
-                    self.renderer.upload_chunk(key, &solid, &liquid);
-                }
+            if self.world.chunks.get(&ckey(cx, cz)).map(|c| !c.meshed).unwrap_or(false) {
+                self.mesh_chunk(cx, cz);
             }
             self.mesh_idx += 1;
             self.boot_done += 1;
@@ -365,41 +373,20 @@ impl Game {
         let north = z & 15 == 0;
         let south = z & 15 == 15;
 
-        let mut targets: Vec<(i32, i32)> = Vec::with_capacity(9);
-        targets.push((cx, cz));
-        if west {
-            targets.push((cx - 1, cz));
-        }
-        if east {
-            targets.push((cx + 1, cz));
-        }
-        if north {
-            targets.push((cx, cz - 1));
-        }
-        if south {
-            targets.push((cx, cz + 1));
-        }
-        if west && north {
-            targets.push((cx - 1, cz - 1));
-        }
-        if west && south {
-            targets.push((cx - 1, cz + 1));
-        }
-        if east && north {
-            targets.push((cx + 1, cz - 1));
-        }
-        if east && south {
-            targets.push((cx + 1, cz + 1));
-        }
-
-        for (tx, tz) in targets {
-            let key = ckey(tx, tz);
-            if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, tx, tz) {
-                if let Some(ch) = self.world.chunks.get_mut(&key) {
-                    ch.meshed = true;
-                    ch.faces = solid.face_count() + liquid.face_count();
-                }
-                self.renderer.upload_chunk(key, &solid, &liquid);
+        let targets = [
+            (true, cx, cz),
+            (west, cx - 1, cz),
+            (east, cx + 1, cz),
+            (north, cx, cz - 1),
+            (south, cx, cz + 1),
+            (west && north, cx - 1, cz - 1),
+            (west && south, cx - 1, cz + 1),
+            (east && north, cx + 1, cz - 1),
+            (east && south, cx + 1, cz + 1),
+        ];
+        for (needed, tx, tz) in targets {
+            if needed {
+                self.mesh_chunk(tx, tz);
             }
         }
     }
@@ -627,9 +614,9 @@ impl Game {
         let aspect = if h > 0.0 { (w / h) as f32 } else { 1.0 };
         let reach = self.reach() as f32;
         let cam = [
-            self.player.pos[0] as f32,
-            (self.player.pos[1] + self.player.eye_height) as f32,
-            self.player.pos[2] as f32,
+            self.player.pos[0],
+            self.player.pos[1] + self.player.eye_height,
+            self.player.pos[2],
         ];
 
         self.renderer.render(
@@ -652,11 +639,6 @@ impl Game {
             self.fps_frames = 0;
         }
 
-        let hand = match self.inv.selected_stack() {
-            Some(s) => format!("{} ×{}", item_name(s.id), s.count),
-            None => "Boş".to_string(),
-        };
-
         let debug = DebugInfo {
             fps: self.fps,
             pos: self.player.pos,
@@ -664,9 +646,9 @@ impl Game {
             draws: self.renderer.stats_draws,
             tris: self.renderer.stats_tris,
             render_dist: self.render_dist,
-            mode_label: self.survival.mode.label().to_string(),
-            fly_label: if self.player.flying { "Uçuş" } else { "Yürüyüş" }.to_string(),
-            hand,
+            mode_label: self.survival.mode.label(),
+            fly_label: if self.player.flying { "Uçuş" } else { "Yürüyüş" },
+            hand: self.inv.selected_stack(),
         };
 
         let inv_open = self.inv_open;
@@ -1226,8 +1208,11 @@ pub fn start() -> Result<(), JsValue> {
         .dyn_into::<HtmlCanvasElement>()
         .map_err(|_| "hud tuvali dönüştürülemedi")?;
 
-    let renderer = Renderer::new(&gl_canvas).map_err(|e| JsValue::from_str(&e))?;
-    let hud = Hud::new(&hud_canvas, &document).map_err(|e| JsValue::from_str(&e))?;
+    // Atlas bir kez üretilir; GL dokusu ve HUD ikonları aynı pikselleri kullanır.
+    let atlas = crate::atlas::build_atlas();
+    let renderer = Renderer::new(&gl_canvas, &atlas).map_err(|e| JsValue::from_str(&e))?;
+    let hud = Hud::new(&hud_canvas, &document, &atlas).map_err(|e| JsValue::from_str(&e))?;
+    drop(atlas);
 
     let seed = (js_random() * 1.0e9) as i32;
     let world = World::new(seed);
@@ -1255,6 +1240,7 @@ pub fn start() -> Result<(), JsValue> {
         grid: [None; 9],
         held: None,
         renderer,
+        mesher: mesh::Mesher::new(),
         hud,
         window: window.clone(),
         document: document.clone(),

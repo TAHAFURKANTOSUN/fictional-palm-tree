@@ -9,7 +9,7 @@ pub const INV_SIZE: usize = 36;
 pub const HOTBAR_SIZE: usize = 9;
 pub const MAX_STACK: u8 = 64;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Stack {
     pub id: u16,
     pub count: u8,

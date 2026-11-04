@@ -55,7 +55,16 @@ pub fn rot_y(a: f32) -> Mat4 {
 /// tutarlıdır.
 pub fn view(yaw: f32, pitch: f32, pos: [f32; 3]) -> Mat4 {
     let t = translate(-pos[0], -pos[1], -pos[2]);
-    mul(&mul(&rot_x(-pitch), &rot_y(-yaw)), &t)
+    mul(&view_rotation(yaw, pitch), &t)
+}
+
+/// Öteleme içermeyen görünüm matrisi: `R_x(-pitch) * R_y(-yaw)`.
+///
+/// **Kameraya göre** çizimde kullanılır: köşeler gölgelendiricide önce kamera
+/// konumundan çıkarılır, böylece büyük dünya koordinatlarında (±50 000) f32
+/// hassasiyet kaybı olmaz.
+pub fn view_rotation(yaw: f32, pitch: f32) -> Mat4 {
+    mul(&rot_x(-pitch), &rot_y(-yaw))
 }
 
 /// Görüş konisi — Gribb–Hartmann yöntemiyle düzlem çıkarımı.
@@ -85,6 +94,22 @@ impl Frustum {
             planes[i] = [p[0] * inv, p[1] * inv, p[2] * inv, p[3] * inv];
         }
         Self { planes }
+    }
+
+    /// Eksen hizalı kutu koninin içinde (veya kesişiyor) mu?
+    ///
+    /// Her düzlem için normal yönünde en uzak köşe ("p-köşesi") sınanır.
+    /// Chunk'lar ince ve yatay olduğundan küreden belirgin şekilde sıkıdır.
+    pub fn aabb_visible(&self, min: [f32; 3], max: [f32; 3]) -> bool {
+        for p in self.planes.iter() {
+            let x = if p[0] >= 0.0 { max[0] } else { min[0] };
+            let y = if p[1] >= 0.0 { max[1] } else { min[1] };
+            let z = if p[2] >= 0.0 { max[2] } else { min[2] };
+            if p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0 {
+                return false;
+            }
+        }
+        true
     }
 
     /// Kapsayıcı küre koninin içinde (veya kesişiyor) mu?
@@ -159,6 +184,82 @@ mod tests {
             }
         }
         assert!(visible, "büyük küre kenardan görünmeliydi");
+    }
+
+    #[test]
+    fn aabb_culling_matches_geometry() {
+        let vp = mul(
+            &perspective(1.2, 1.6, 0.1, 200.0),
+            &view(0.0, 0.0, [0.0, 0.0, 0.0]),
+        );
+        let f = Frustum::from_view_proj(&vp);
+        // İleride, arkada, çok yanda.
+        assert!(f.aabb_visible([-1.0, -1.0, -11.0], [1.0, 1.0, -9.0]));
+        assert!(!f.aabb_visible([-1.0, -1.0, 9.0], [1.0, 1.0, 11.0]));
+        assert!(!f.aabb_visible([499.0, -1.0, -11.0], [501.0, 1.0, -9.0]));
+        // Kamerayı içine alan kutu her zaman görünür.
+        assert!(f.aabb_visible([-8.0, -8.0, -8.0], [8.0, 8.0, 8.0]));
+        // Uzak düzlemin ötesi elenir.
+        assert!(!f.aabb_visible([-1.0, -1.0, -260.0], [1.0, 1.0, -250.0]));
+    }
+
+    /// Kutu testi, kutunun 8 köşesinden biri bile konideyse kutuyu elememeli
+    /// (muhafazakâr olmalı) ve küre testinden asla daha gevşek olmamalı.
+    #[test]
+    fn aabb_is_conservative_and_tighter_than_sphere() {
+        let vp = mul(
+            &perspective(1.3, 1.7, 0.05, 180.0),
+            &view(0.6, -0.25, [3.0, 40.0, -7.0]),
+        );
+        let f = Frustum::from_view_proj(&vp);
+        let inside = |p: [f32; 3]| {
+            let c = [
+                vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12],
+                vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13],
+                vp[2] * p[0] + vp[6] * p[1] + vp[10] * p[2] + vp[14],
+                vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15],
+            ];
+            c[3] > 0.0 && (0..3).all(|i| c[i].abs() <= c[3])
+        };
+        let mut culled = 0;
+        let mut sphere_kept_box_culled = 0;
+        for cz in -12..=12 {
+            for cx in -12..=12 {
+                let min = [cx as f32 * 16.0, 20.0, cz as f32 * 16.0];
+                let max = [min[0] + 16.0, 46.0, min[2] + 16.0];
+                let any_corner = (0..8).any(|k| {
+                    inside([
+                        if k & 1 == 0 { min[0] } else { max[0] },
+                        if k & 2 == 0 { min[1] } else { max[1] },
+                        if k & 4 == 0 { min[2] } else { max[2] },
+                    ])
+                });
+                let boxed = f.aabb_visible(min, max);
+                if any_corner {
+                    assert!(boxed, "görünen kutu elendi: {min:?}");
+                }
+                let c = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0, (min[2] + max[2]) / 2.0];
+                let r = ((8.0f32).powi(2) * 2.0 + 13.0f32.powi(2)).sqrt();
+                let sphere = f.sphere_visible(c, r);
+                assert!(!boxed || sphere, "kutu küreden gevşek olamaz");
+                culled += !boxed as u32;
+                sphere_kept_box_culled += (sphere && !boxed) as u32;
+            }
+        }
+        assert!(culled > 0 && sphere_kept_box_culled > 0, "kutu testi daha sıkı olmalı");
+    }
+
+    #[test]
+    fn view_is_rotation_after_translation() {
+        let (yaw, pitch, pos) = (0.8f32, -0.4f32, [5.0f32, 31.0, -12.0]);
+        let a = view(yaw, pitch, pos);
+        let b = mul(&view_rotation(yaw, pitch), &translate(-pos[0], -pos[1], -pos[2]));
+        for k in 0..16 {
+            assert!((a[k] - b[k]).abs() < 1e-6);
+        }
+        // Rotasyon matrisi ötelemesizdir.
+        let r = view_rotation(yaw, pitch);
+        assert_eq!([r[12], r[13], r[14]], [0.0, 0.0, 0.0]);
     }
 
     #[test]

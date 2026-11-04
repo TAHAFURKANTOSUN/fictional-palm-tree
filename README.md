@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-116%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-124%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -46,9 +46,11 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - ❤️ **Hayatta kalma modu** — can, açlık, nefes, düşme hasarı ve boğulma.
 - 🕊️ **Yaratıcı mod** — uçuş, sınırsız blok, envanter yedekleme.
 - 🛠️ **3×3 craft sistemi** — konumdan bağımsız şekilli ve şekilsiz tarifler.
-- ⚡ **Yüksek performans** — görüş konisi (frustum) ayıklama, ~120 FPS.
+- ⚡ **Yüksek performans** — 8 bayt/köşe paketlenmiş mesh, kopyasız GPU
+  yüklemesi, paylaşılan indeks tamponu, kutu tabanlı görüş konisi (frustum)
+  ayıklama; arayüz yalnızca değiştiğinde çizilir. ~120 FPS.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
-- ✅ **116 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **124 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -216,16 +218,16 @@ voxelcraft-rs/
 │   ├── blocks.rs         # blok/eşya kimlikleri ve doku eşlemeleri
 │   ├── noise.rs          # Perlin gürültüsü + hash fonksiyonları
 │   ├── world.rs          # sonsuz chunk deposu, arazi üretimi, oyuncu düzenlemeleri
-│   ├── mesh.rs           # yüz mesh'i + ambient occlusion
+│   ├── mesh.rs           # yüz mesh'i + ambient occlusion (GPU'ya hazır 8 bayt/köşe)
 │   ├── atlas.rs          # prosedürel doku atlası (RGBA tampon)
 │   ├── raycast.rs        # DDA voxel ışın izleme
 │   ├── player.rs         # hareket, AABB çarpışması, uçuş
 │   ├── inventory.rs      # 36 yuvalı envanter
 │   ├── crafting.rs       # 3×3 şekilli/şekilsiz tarifler
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
-│   ├── mat4.rs           # 4×4 matrisler + görüş konisi (frustum)
-│   ├── gl.rs             # WebGL2 çizici (gölgelendiriciler, VAO/VBO)
-│   ├── hud.rs            # Canvas2D arayüzü (kalpler, çubuk, envanter ekranı)
+│   ├── mat4.rs           # 4×4 matrisler + görüş konisi (frustum, kutu/küre testi)
+│   ├── gl.rs             # WebGL2 çizici (kopyasız yükleme, paylaşılan indeks, tampon havuzu)
+│   ├── hud.rs            # Canvas2D arayüzü (yalnızca değişince çizilir)
 │   └── app.rs            # oyun döngüsü, girdi, chunk akışı
 └── tools/
     ├── smoke.sh               # güvenli başsız Chrome testi (kurulum+test+temizlik)
@@ -238,7 +240,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 118 test
+cargo test --lib          # 124 test
 ```
 
 <details>
@@ -251,7 +253,10 @@ cargo test --lib          # 118 test
 - Üretimin sırasız ve deterministik olması
 - Oyuncu düzenlemelerinin kalıcılığı
 - ±1.000.000 blok uzakta arazi üretimi
-- Mesh öznitelik dengesi, indeks sınırları, daraltılmış y aralığı, kapsayıcı küre
+- Paketlenmiş köşe biçimi, AO köşegeninin paylaşılan indeks deseniyle korunması,
+  daraltılmış y aralığı, kapsayıcı kutu, mesh tamponlarının yeniden kullanımı
+- Arazinin altına kazılan **derin çukurun tabanının** mesh'e girmesi
+- Görüş konisi kutu testinin muhafazakâr ve küreden sıkı olması
 - Mesh'in chunk'taki **en yüksek bloğu** (ağaç tepeleri) kapsaması
 - Köşe AO'sunun **çapraz komşu chunk'a** bağlı olması
 - Atlas döşemeleri
