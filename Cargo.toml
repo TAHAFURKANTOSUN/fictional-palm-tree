@@ -37,6 +37,7 @@ features = [
   "WebGlVertexArrayObject",
   "WebGlTexture",
   "WebGlUniformLocation",
+  "WebglMultiDraw",
   "Event",
   "EventTarget",
   "KeyboardEvent",

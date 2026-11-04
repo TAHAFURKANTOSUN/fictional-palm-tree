@@ -40,6 +40,29 @@ fn paint(atlas: &mut [u8], index: u8, f: impl Fn(i32, i32) -> [u8; 4]) {
     }
 }
 
+/// Saydam pikseli (alfa < 128, yani gölgelendiricideki `0.5` eşiğinin altı)
+/// olan döşemelerin bit maskesi: bit `t` ⇒ döşeme `t`.
+///
+/// Bu döşemeleri kullanan yüzler "oyuk" (cutout) katmanına gider ve `discard`
+/// içeren gölgelendiriciyle çizilir. Geri kalan her şey `discard`'sız
+/// çizilir; böylece GPU erken derinlik testini tam kullanabilir.
+pub fn cutout_tiles() -> u64 {
+    static MASK: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MASK.get_or_init(|| {
+        let a = build_atlas();
+        let mut mask = 0u64;
+        for t in 0..ATLAS_COLS as usize {
+            let x0 = t * TILE as usize;
+            let holes = (0..ATLAS_H)
+                .any(|y| (0..TILE as usize).any(|x| a[(y * ATLAS_W + x0 + x) * 4 + 3] < 128));
+            if holes {
+                mask |= 1 << t;
+            }
+        }
+        mask
+    })
+}
+
 /// Atlası sıfırdan üretir; çıktı `ATLAS_W * ATLAS_H * 4` baytlık RGBA'dır.
 pub fn build_atlas() -> Vec<u8> {
     let mut a = vec![0u8; ATLAS_W * ATLAS_H * 4];
@@ -285,5 +308,13 @@ mod tests {
         let bottom = (15 * ATLAS_W + x_off + 5) * 4;
         assert!(a[top + 1] > a[top + 0], "çim yanının üstü yeşil olmalı");
         assert!(a[bottom + 0] > a[bottom + 1], "çim yanının altı kahverengi olmalı");
+    }
+
+    #[test]
+    fn only_glass_has_cutout_pixels() {
+        // Kullanılan döşemeler 0..=T_CRAFT_SIDE; sondaki boş döşeme sayılmaz.
+        let used = (1u64 << (crate::blocks::T_CRAFT_SIDE + 1)) - 1;
+        let mask = cutout_tiles() & used;
+        assert_eq!(mask, 1 << crate::blocks::T_GLASS, "beklenmeyen oyuk maskesi: {mask:#b}");
     }
 }

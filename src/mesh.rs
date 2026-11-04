@@ -13,7 +13,13 @@
 //! * **Komşu tablosu.** Chunk ve 8 komşusunun ilgili dilimi önce 18×18×H'lik
 //!   dolgulu bir diziye kopyalanır; böylece mesh sırasında her komşu okuması
 //!   tek bir dizi indeksidir (`HashMap` ya da chunk hesabı yok).
+//! * **Üç katman.** Opak (çoğu blok), oyuk (saydam pikselli döşemeler: cam)
+//!   ve sıvı. Opak katman `discard`'sız gölgelendiriciyle çizilir.
+//! * **Yön grupları.** Her katmanın yüzleri 6 normal yönüne göre gruplanır
+//!   ([`MeshData::groups`]); çizici kameraya sırtını dönen grupları hiç
+//!   göndermez ([`visible_groups`]).
 
+use crate::atlas::cutout_tiles;
 use crate::blocks::*;
 use crate::noise::hash3f;
 use crate::world::{ckey, World, CHUNK_AREA, CHUNK_SIZE, WORLD_HEIGHT};
@@ -87,11 +93,14 @@ pub const FACES: [Face; 6] = [
     },
 ];
 
-/// Bir chunk katmanının (katı ya da sıvı) GPU'ya hazır geometrisi.
+/// Bir chunk katmanının GPU'ya hazır geometrisi.
 #[derive(Default, Clone)]
 pub struct MeshData {
-    /// Dörtlü gruplar hâlinde köşeler; her grup bir yüzdür.
+    /// Dörtlü gruplar hâlinde köşeler; her grup bir yüzdür. Yüzler
+    /// [`FACES`] sırasına göre yön yön dizilidir.
     pub verts: Vec<Vertex>,
+    /// Her yöndeki yüz sayısı (`FACES` sırasıyla); toplamı `face_count()`.
+    pub groups: [u32; 6],
 }
 
 impl MeshData {
@@ -112,6 +121,45 @@ impl MeshData {
     /// Tamponu temizler — yeniden kullanılırken ayırma yapılmaz.
     pub fn reset(&mut self) {
         self.verts.clear();
+        self.groups = [0; 6];
+    }
+
+    /// `f` yön grubunun ilk yüzünün katman içindeki sırası.
+    pub fn group_start(&self, f: usize) -> u32 {
+        self.groups[..f].iter().sum()
+    }
+
+    /// Her yön grubundaki yüzlerin, kendi normal ekseni boyunca düzlem
+    /// koordinatı aralığı `[min, max]` (chunk-yerel). Boş grupta `[255, 0]`.
+    pub fn plane_spans(&self) -> [[u8; 2]; 6] {
+        let mut spans = [[u8::MAX, 0]; 6];
+        let mut q = 0usize;
+        for (f, &n) in self.groups.iter().enumerate() {
+            let axis = FACE_AXIS[f];
+            for quad in self.verts[q * 4..(q + n as usize) * 4].chunks_exact(4) {
+                let p = quad[0][axis];
+                spans[f][0] = spans[f][0].min(p);
+                spans[f][1] = spans[f][1].max(p);
+            }
+            q += n as usize;
+        }
+        spans
+    }
+
+    /// İki katmanı yön grupları korunarak birleştirir (testler ve opak/oyuk
+    /// ayrımını önemsemeyen çağıranlar için).
+    pub fn merged(a: &MeshData, b: &MeshData) -> MeshData {
+        let mut out = MeshData::default();
+        let (mut qa, mut qb) = (0usize, 0usize);
+        for f in 0..6 {
+            let (na, nb) = (a.groups[f] as usize, b.groups[f] as usize);
+            out.verts.extend_from_slice(&a.verts[qa * 4..(qa + na) * 4]);
+            out.verts.extend_from_slice(&b.verts[qb * 4..(qb + nb) * 4]);
+            out.groups[f] = (na + nb) as u32;
+            qa += na;
+            qb += nb;
+        }
+        out
     }
 
     /// GPU'ya gidecek ham baytlar (kopya yok).
@@ -132,6 +180,33 @@ impl MeshData {
         }
         Some((min, max))
     }
+}
+
+/// Her yön grubunun normal ekseni (0 = x, 1 = y, 2 = z) ve yönü.
+const FACE_AXIS: [usize; 6] = [0, 0, 1, 1, 2, 2];
+const FACE_POSITIVE: [bool; 6] = [true, false, true, false, true, false];
+
+/// Kameraya **dönük olabilecek** yön gruplarının bit maskesi (bit `f` ⇒
+/// `FACES[f]`). `cam` chunk-yerel kamera konumudur.
+///
+/// Bir yüz yalnızca kamera düzleminin ön tarafındaysa görünür (perspektifte
+/// arka yüz elemesiyle birebir aynı kural). `+n` yönlü bir grubun en alçak
+/// düzlemi bile kameranın önündeyse grubun hiçbir yüzü görünmez; bu test
+/// muhafazakârdır (görünen bir yüzü asla atmaz).
+pub fn visible_groups(cam: [f32; 3], spans: &[[u8; 2]; 6], groups: &[u32; 6]) -> u8 {
+    let mut mask = 0u8;
+    for f in 0..6 {
+        if groups[f] == 0 {
+            continue;
+        }
+        let c = cam[FACE_AXIS[f]];
+        let [lo, hi] = spans[f];
+        let visible = if FACE_POSITIVE[f] { c > lo as f32 } else { c < hi as f32 };
+        if visible {
+            mask |= 1 << f;
+        }
+    }
+    mask
 }
 
 /// Köşenin chunk-yerel konumu.
@@ -165,13 +240,23 @@ const PAREA: usize = PX * PX;
 /// Dolgulu tabloda bir eksen boyunca 1 bloğun ofseti.
 const AXIS_STRIDE: [isize; 3] = [1, PAREA as isize, PX as isize];
 
+/// Katman indeksleri.
+const OPAQUE: usize = 0;
+const CUTOUT: usize = 1;
+const LIQUID: usize = 2;
+
 /// Yeniden kullanılabilir mesh üreticisi. Tamponlar kareler arasında
 /// korunur; kararlı durumda mesh üretimi hiç bellek ayırmaz.
 #[derive(Default)]
 pub struct Mesher {
     /// 18×18×(y aralığı + 2) blok kimlikleri.
     pad: Vec<u8>,
-    pub solid: MeshData,
+    /// Katman × yön başına geçici köşe kovaları.
+    buckets: [[Vec<Vertex>; 6]; 3],
+    /// Saydam pikseli olmayan katı yüzler (`discard`'sız çizilir).
+    pub opaque: MeshData,
+    /// Saydam pikselli döşemeler (cam): alfa testiyle çizilir.
+    pub cutout: MeshData,
     pub liquid: MeshData,
 }
 
@@ -180,14 +265,23 @@ impl Mesher {
         Self::default()
     }
 
-    /// `(cx, cz)` chunk'ının katı ve sıvı mesh'ini `self.solid` /
-    /// `self.liquid` içine üretir.
+    /// Üç katmanın toplam yüz sayısı.
+    pub fn face_count(&self) -> u32 {
+        self.opaque.face_count() + self.cutout.face_count() + self.liquid.face_count()
+    }
+
+    /// `(cx, cz)` chunk'ının mesh'ini `opaque` / `cutout` / `liquid`
+    /// katmanlarına üretir.
     ///
     /// 8 komşusunun verisi hazır değilse `false` döner (sınırda hayalet yüz
-    /// oluşmasın); tamponlar o durumda boş bırakılır.
+    /// oluşmasın); katmanlar o durumda boş bırakılır.
     pub fn build(&mut self, world: &World, cx: i32, cz: i32) -> bool {
-        self.solid.reset();
+        self.opaque.reset();
+        self.cutout.reset();
         self.liquid.reset();
+        for b in self.buckets.iter_mut().flatten() {
+            b.clear();
+        }
 
         let mut nbs: [&[u8]; 9] = [&[]; 9];
         let mut open_bottom = i32::MAX;
@@ -266,6 +360,7 @@ impl Mesher {
 
         let x0 = cx * CHUNK_SIZE;
         let z0 = cz * CHUNK_SIZE;
+        let cutout = cutout_tiles();
 
         for y in y0..=y1 {
             let layer = (y - py0) as usize * PAREA;
@@ -330,7 +425,14 @@ impl Mesher {
                             ];
                         }
 
-                        let out = if def.liquid { &mut self.liquid.verts } else { &mut self.solid.verts };
+                        let layer = if def.liquid {
+                            LIQUID
+                        } else if cutout & (1 << tile) != 0 {
+                            CUTOUT
+                        } else {
+                            OPAQUE
+                        };
+                        let out = &mut self.buckets[layer][f];
                         // Köşegen AO'ya göre seçilir: indeks deseni sabit
                         // olduğundan köşe sırası döndürülür — (1,2,3)+(1,3,0)
                         // üçgenleri eskisiyle birebir aynıdır.
@@ -344,12 +446,24 @@ impl Mesher {
             }
         }
 
+        // Kovaları katmanlara yön sırasıyla diz.
+        for (layer, out) in [&mut self.opaque, &mut self.cutout, &mut self.liquid]
+            .into_iter()
+            .enumerate()
+        {
+            for (f, bucket) in self.buckets[layer].iter().enumerate() {
+                out.groups[f] = (bucket.len() / 4) as u32;
+                out.verts.extend_from_slice(bucket);
+            }
+        }
+
         true
     }
 }
 
-/// Bir chunk için katı ve sıvı mesh üretir (tek seferlik kullanım ve testler).
-/// Sık çağrılan yerlerde tamponları korumak için [`Mesher`] kullanın.
+/// Bir chunk için `(katı, sıvı)` mesh üretir; katı = opak + oyuk
+/// (tek seferlik kullanım ve testler). Sık çağrılan yerlerde tamponları
+/// korumak ve katmanları ayrı almak için [`Mesher`] kullanın.
 ///
 /// 8 komşusunun verisi hazır değilse `None` döner (sınırda hayalet yüz oluşmasın).
 pub fn build_chunk_mesh(world: &World, cx: i32, cz: i32) -> Option<(MeshData, MeshData)> {
@@ -357,7 +471,7 @@ pub fn build_chunk_mesh(world: &World, cx: i32, cz: i32) -> Option<(MeshData, Me
     if !m.build(world, cx, cz) {
         return None;
     }
-    Some((m.solid, m.liquid))
+    Some((MeshData::merged(&m.opaque, &m.cutout), m.liquid))
 }
 
 /// Testlerin ihtiyaç duyduğu, komşuları hazır küçük dünya.
@@ -512,14 +626,14 @@ mod tests {
         let w = test_world(42);
         let mut m = Mesher::new();
         assert!(m.build(&w, 1, 1));
-        let first = m.solid.verts.clone();
-        let cap = m.solid.verts.capacity();
+        let first = m.opaque.verts.clone();
+        let cap = m.opaque.verts.capacity();
         assert!(m.build(&w, 0, 0));
         assert!(m.build(&w, 1, 1));
-        assert_eq!(m.solid.verts, first);
-        assert!(m.solid.verts.capacity() >= cap);
+        assert_eq!(m.opaque.verts, first);
+        assert!(m.opaque.verts.capacity() >= cap);
         let (fresh, _) = build_chunk_mesh(&w, 1, 1).unwrap();
-        assert_eq!(fresh.verts, first);
+        assert_eq!(fresh.verts.len(), first.len(), "cam yokken katı = opak");
     }
 
     #[test]
@@ -623,6 +737,91 @@ mod tests {
             quads(&before), quads(&after),
             "yalnızca AO değişmeli; yüzler aynı kalmalı"
         );
+    }
+
+    /// Yüzler yön gruplarına doğru dizilmeli: grup `f`'deki her dörtgen
+    /// `FACES[f]` normaline sahip olmalı (4 köşesi de aynı düzlemde).
+    #[test]
+    fn faces_are_grouped_by_direction() {
+        let w = test_world(8);
+        let mut m = Mesher::new();
+        assert!(m.build(&w, 0, 0));
+        for layer in [&m.opaque, &m.cutout, &m.liquid] {
+            assert_eq!(layer.groups.iter().sum::<u32>(), layer.face_count());
+            let mut q = 0;
+            for (f, &n) in layer.groups.iter().enumerate() {
+                let a = FACE_AXIS[f];
+                for quad in layer.verts[q * 4..(q + n as usize) * 4].chunks_exact(4) {
+                    assert!(quad.iter().all(|v| v[a] == quad[0][a]), "grup {f} düzlemsel değil");
+                    let other = (a + 1) % 3;
+                    assert!(quad.iter().any(|v| v[other] != quad[0][other]));
+                }
+                q += n as usize;
+            }
+            for (span, &n) in layer.plane_spans().iter().zip(&layer.groups) {
+                if n > 0 {
+                    assert!(span[0] <= span[1]);
+                }
+            }
+        }
+    }
+
+    /// Cam yüzleri oyuk katmanına, geri kalan katılar opak katmana gider.
+    #[test]
+    fn glass_goes_to_the_cutout_layer() {
+        let mut w = test_world(13);
+        let (x, z) = (4, 4);
+        let h = w.height_at(x, z);
+        // Havada asılı (6 yüzü de açık) bir cam bloğu.
+        for y in h + 1..h + 8 {
+            assert!(w.set_block_raw(x, y, z, AIR));
+        }
+        assert!(w.set_block_raw(x, h + 4, z, GLASS));
+        let mut m = Mesher::new();
+        assert!(m.build(&w, 0, 0));
+        assert_eq!(m.cutout.face_count(), 6, "havada tek cam bloğu 6 yüz");
+        let glass_tile = block_def(GLASS).side;
+        assert!(m.cutout.verts.iter().all(|v| vertex_tile(v).0 == glass_tile));
+        assert!(m.opaque.verts.iter().all(|v| vertex_tile(v).0 != glass_tile));
+        let (solid, _) = build_chunk_mesh(&w, 0, 0).unwrap();
+        assert_eq!(solid.face_count(), m.opaque.face_count() + m.cutout.face_count());
+    }
+
+    /// Yön elemesi muhafazakâr olmalı: kameraya dönük (ön yüzü görünen) her
+    /// dörtgenin grubu maskede bulunmalı; ve kamera dışarıdayken bir şeyler
+    /// gerçekten elenmeli.
+    #[test]
+    fn group_culling_never_drops_front_faces() {
+        let w = test_world(20261012);
+        let mut m = Mesher::new();
+        assert!(m.build(&w, 0, 0));
+        let layer = &m.opaque;
+        let spans = layer.plane_spans();
+        let mut culled_any = false;
+        for cam in [
+            [8.0f32, 80.0, 8.0],
+            [-20.0, 30.0, 5.0],
+            [40.0, 10.0, -30.0],
+            [7.5, 33.2, 9.1],
+            [16.0, 64.0, 16.0],
+            [0.0, 0.0, 0.0],
+        ] {
+            let mask = visible_groups(cam, &spans, &layer.groups);
+            culled_any |= mask.count_ones() < layer.groups.iter().filter(|&&g| g > 0).count() as u32;
+            let mut q = 0;
+            for f in 0..6 {
+                for quad in layer.verts[q * 4..(q + layer.groups[f] as usize) * 4].chunks_exact(4) {
+                    let a = FACE_AXIS[f];
+                    let p = quad[0][a] as f32;
+                    let front = if FACE_POSITIVE[f] { cam[a] > p } else { cam[a] < p };
+                    if front {
+                        assert!(mask & (1 << f) != 0, "kamera {cam:?}: görünen grup {f} elendi");
+                    }
+                }
+                q += layer.groups[f] as usize;
+            }
+        }
+        assert!(culled_any, "dışarıdaki kameralar için hiçbir grup elenmedi");
     }
 
     #[test]

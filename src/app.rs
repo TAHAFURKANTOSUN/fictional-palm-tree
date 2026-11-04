@@ -169,12 +169,12 @@ impl Game {
             return false;
         }
         let key = ckey(cx, cz);
-        let (solid, liquid) = (&self.mesher.solid, &self.mesher.liquid);
+        let m = &self.mesher;
         if let Some(ch) = self.world.chunks.get_mut(&key) {
             ch.meshed = true;
-            ch.faces = solid.face_count() + liquid.face_count();
+            ch.faces = m.face_count();
         }
-        self.renderer.upload_chunk(key, cx, cz, solid, liquid);
+        self.renderer.upload_chunk(key, cx, cz, &m.opaque, &m.cutout, &m.liquid);
         true
     }
 
@@ -975,7 +975,7 @@ pub fn debug_state_json() -> String {
                 "\"selected\":{},\"held\":{},",
                 "\"pos\":[{:.2},{:.2},{:.2}],\"yaw\":{:.3},\"pitch\":{:.3},",
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
-                "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
+                "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},\"multiDraw\":{},",
                 "\"slots\":[{}]",
                 "}}"
             ),
@@ -1006,6 +1006,7 @@ pub fn debug_state_json() -> String {
             g.hud.width,
             g.hud.height,
             g.player.feet_in_water(&g.world),
+            g.renderer.multi_draw(),
             slots.join(",")
         )
     })

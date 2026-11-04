@@ -188,7 +188,7 @@ async function main() {
   await evalJs(`window.__vcRs.debug_set_look(0.9, -0.05); 1`);
   await sleep(2500);
   st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
-  out.perf = { fps: st.fps, chunks: st.chunks, draws: st.draws, tris: st.tris, pos: st.pos };
+  out.perf = { fps: st.fps, chunks: st.chunks, draws: st.draws, tris: st.tris, multiDraw: st.multiDraw, pos: st.pos };
 
   // ---- 13) Uzak ışınlanma (sonsuz dünya akışı) ----
   await evalJs(`window.__vcRs.debug_teleport(50000.5, 90, -50000.5); 1`);

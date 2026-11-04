@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-124%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-132%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -46,11 +46,13 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - ❤️ **Hayatta kalma modu** — can, açlık, nefes, düşme hasarı ve boğulma.
 - 🕊️ **Yaratıcı mod** — uçuş, sınırsız blok, envanter yedekleme.
 - 🛠️ **3×3 craft sistemi** — konumdan bağımsız şekilli ve şekilsiz tarifler.
-- ⚡ **Yüksek performans** — 8 bayt/köşe paketlenmiş mesh, kopyasız GPU
-  yüklemesi, paylaşılan indeks tamponu, kutu tabanlı görüş konisi (frustum)
-  ayıklama; arayüz yalnızca değiştiğinde çizilir. ~120 FPS.
+- ⚡ **Yüksek performans** — tüm dünya tek GPU tamponunda; `WEBGL_multi_draw`
+  ile her geçiş tek çizim çağrısı (kare başına ~15 WebGL çağrısı). 8 bayt/köşe
+  paketlenmiş mesh, kopyasız yükleme, kameraya sırtını dönen yüzlerin ve görüş
+  konisi dışındaki chunk'ların ayıklanması, `discard`'sız opak gölgelendirici;
+  arayüz yalnızca değiştiğinde çizilir. ~120 FPS.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
-- ✅ **124 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **132 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -157,7 +159,7 @@ Motor bilerek iki katmana ayrıldı:
 
 | Katman | Modüller | Özellik |
 |---|---|---|
-| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
+| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `alloc`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
 | **Tarayıcı katmanı** | `app`, `gl`, `hud` | Yalnızca `wasm32` hedefinde derlenir (`#[cfg(target_arch = "wasm32")]`) |
 
 Bu ayrım sayesinde oyunun **tüm kuralları** (arazi sürekliliği, mesh üretimi,
@@ -181,6 +183,7 @@ flowchart LR
         inventory["inventory"]
         crafting["crafting"]
         mat4["mat4"]
+        alloc["alloc"]
     end
     app --> gl
     app --> hud
@@ -192,6 +195,8 @@ flowchart LR
     gl --> mesh
     gl --> atlas
     gl --> mat4
+    gl --> alloc
+    mesh --> atlas
     hud --> atlas
     hud --> crafting
     hud --> survival
@@ -220,13 +225,14 @@ voxelcraft-rs/
 │   ├── world.rs          # sonsuz chunk deposu, arazi üretimi, oyuncu düzenlemeleri
 │   ├── mesh.rs           # yüz mesh'i + ambient occlusion (GPU'ya hazır 8 bayt/köşe)
 │   ├── atlas.rs          # prosedürel doku atlası (RGBA tampon)
+│   ├── alloc.rs          # GPU arenası için sayfa ayırıcı
 │   ├── raycast.rs        # DDA voxel ışın izleme
 │   ├── player.rs         # hareket, AABB çarpışması, uçuş
 │   ├── inventory.rs      # 36 yuvalı envanter
 │   ├── crafting.rs       # 3×3 şekilli/şekilsiz tarifler
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
 │   ├── mat4.rs           # 4×4 matrisler + görüş konisi (frustum, kutu/küre testi)
-│   ├── gl.rs             # WebGL2 çizici (kopyasız yükleme, paylaşılan indeks, tampon havuzu)
+│   ├── gl.rs             # WebGL2 çizici (tek arena, multi-draw, yön elemesi)
 │   ├── hud.rs            # Canvas2D arayüzü (yalnızca değişince çizilir)
 │   └── app.rs            # oyun döngüsü, girdi, chunk akışı
 └── tools/
@@ -240,7 +246,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 124 test
+cargo test --lib          # 132 test
 ```
 
 <details>
@@ -257,6 +263,10 @@ cargo test --lib          # 124 test
   daraltılmış y aralığı, kapsayıcı kutu, mesh tamponlarının yeniden kullanımı
 - Arazinin altına kazılan **derin çukurun tabanının** mesh'e girmesi
 - Görüş konisi kutu testinin muhafazakâr ve küreden sıkı olması
+- Yön elemesinin kameraya dönük hiçbir yüzü atmaması; yüzlerin yön gruplarına
+  ve cam yüzlerinin oyuk katmanına ayrılması
+- Sayfa ayırıcının rastgele ayırma/serbest bırakma dizisinde basit bir modelle
+  birebir uyuşması (çakışma yok, kayıp yok, boşluklar birleşik)
 - Mesh'in chunk'taki **en yüksek bloğu** (ağaç tepeleri) kapsaması
 - Köşe AO'sunun **çapraz komşu chunk'a** bağlı olması
 - Atlas döşemeleri

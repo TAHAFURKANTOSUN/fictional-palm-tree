@@ -10,6 +10,7 @@
 //! * **Tarayıcı katmanı** (`app`, `gl`, `hud`, `mat4`) — yalnızca
 //!   `wasm32` hedefinde derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
 
+pub mod alloc;
 pub mod atlas;
 pub mod blocks;
 pub mod crafting;
