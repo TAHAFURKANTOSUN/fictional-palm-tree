@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-147%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-159%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -51,13 +51,16 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - 🔭 **Uzakta da net** — çizim kameraya göre yapılır; orijinden 1.000.000 blok
   uzakta bile geometri titremez.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
+- 🔦 **Meşale** — geceyi gerçekten aydınlatır; elde tutarken de ışık verir.
+- 🎣 **Olta ve balık** — suya at, balık vurunca çek; balık yenir (+5 açlık).
+- 🚗 **Araba** — üret, yere bırak, <kbd>R</kbd> ile bin; tek blokluk basamakları çıkar.
 - 🌗 **Gündüz–gece döngüsü** — 12 dakikalık gün; gün batımı renkleri, ay ve
   yıldızlar, saate göre ortam ışığı. Yaprakların arasından gökyüzü görünür.
 - 🌅 **Görsel dokunuşlar** — güneş ve halesi, dalgalanan su parıltısı, su altı
   sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **147 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **159 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -112,7 +115,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | Hareket |
 | Fare | Etrafa bak |
 | Sol Tık (basılı tut) | Blok kır — sertliğe göre süre alır, yaratıcıda anında |
-| Sağ Tık | Blok koy / elma ye |
+| Sağ Tık | Blok koy / ye / oltayı at-çek / arabayı bırak |
 | <kbd>E</kbd> | Envanter & çalışma tezgahı |
 | <kbd>F</kbd> veya <kbd>Space</kbd> ×2 | Uçuş (yalnızca Yaratıcı mod) |
 | <kbd>G</kbd> | Yaratıcı ↔ Hayatta Kalma |
@@ -121,6 +124,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | <kbd>1</kbd>–<kbd>9</kbd>, fare tekerleği | Yuva seç |
 | <kbd>[</kbd> <kbd>]</kbd> | Görüş mesafesi (3–16 bölge) |
 | <kbd>H</kbd> | Arayüzü gizle |
+| <kbd>R</kbd> | Arabaya bin / in (<kbd>Shift</kbd>+<kbd>R</kbd>: arabayı envantere al) |
 | <kbd>Esc</kbd> | Fareyi bırak |
 
 ## 🌲 Oynanış
@@ -138,7 +142,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 - **Yemek** — yapraklar %14 olasılıkla 🍎 **elma** düşürür; sağ tıkla ye
   (+6 açlık).
 - **Yaratıcı mod** (<kbd>G</kbd>) — can/açlık devre dışı, uçuş açık, envanter
-  13 çeşit bloğun 64'lük paletiyle dolar, koymak hiçbir şey harcamaz. Hayatta
+  17 çeşit blok ve eşyanın 64'lük paletiyle dolar, koymak hiçbir şey harcamaz. Hayatta
   kalmaya dönünce önceki envanterin aynen geri gelir.
 
 ### 🛠️ Craft tarifleri
@@ -153,6 +157,9 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | Kum + Tahta | 2 Cam |
 | 4 Taş (2×2) | 4 Tuğla |
 | Toprak + Yaprak | Çim Bloğu |
+| Çubuk + Kütük | 4 Meşale |
+| 3 Çubuk (çapraz) | Olta |
+| 2 Tahta (üst) + 2 Parke Taşı (alt) | Araba |
 
 Şekilli tarifler **konumdan bağımsızdır**: malzemeyi ızgaranın neresine
 koyarsan koy, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
@@ -165,7 +172,7 @@ Motor bilerek iki katmana ayrıldı:
 
 | Katman | Modüller | Özellik |
 |---|---|---|
-| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
+| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
 | **Tarayıcı katmanı** | `app`, `gl`, `hud` | Yalnızca `wasm32` hedefinde derlenir (`#[cfg(target_arch = "wasm32")]`) |
 
 Bu ayrım sayesinde oyunun **tüm kuralları** (arazi sürekliliği, mesh üretimi,
@@ -259,6 +266,8 @@ voxelcraft-rs/
 │   ├── crafting.rs       # 3×3 şekilli/şekilsiz tarifler
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
 │   ├── effects.rs        # kazma ilerlemesi + kırılma parçacıkları
+│   ├── fishing.rs        # olta: şamandıra, bekleme, balığın vurması
+│   ├── vehicle.rs        # araba fiziği (gaz, direksiyon, basamak çıkma)
 │   ├── sky.rs            # gündüz–gece döngüsü (renkler, güneş, ışık)
 │   ├── pacing.rs         # uyarlanabilir çözünürlük (kare hızı koruması)
 │   ├── mat4.rs           # 4×4 matrisler + görüş konisi (frustum)
@@ -276,7 +285,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 147 test
+cargo test --lib          # 159 test
 ```
 
 <details>

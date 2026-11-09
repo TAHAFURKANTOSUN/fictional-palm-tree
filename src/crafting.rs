@@ -3,7 +3,10 @@
 //! Şekilli tarifler **konumdan bağımsızdır**: malzeme ızgaranın neresine
 //! konursa konsun, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
 
-use crate::blocks::{CRAFT_TABLE, DIRT, GRASS, LEAVES, LOG, PLANKS, SAND, STICK, STONE};
+use crate::blocks::{
+    CAR, COBBLE, CRAFT_TABLE, DIRT, FISHING_ROD, GRASS, LEAVES, LOG, PLANKS, SAND, STICK, STONE,
+    TORCH,
+};
 use crate::inventory::{Inventory, Stack, MAX_STACK};
 
 pub type Grid = [Option<Stack>; 9];
@@ -21,7 +24,7 @@ pub struct Recipe {
     pub out: (u16, u8),
 }
 
-pub static RECIPES: [Recipe; 6] = [
+pub static RECIPES: [Recipe; 9] = [
     Recipe {
         id: "planks",
         kind: RecipeKind::Shapeless { inputs: &[LOG as u16] },
@@ -51,6 +54,24 @@ pub static RECIPES: [Recipe; 6] = [
         id: "grass",
         kind: RecipeKind::Shapeless { inputs: &[DIRT as u16, LEAVES as u16] },
         out: (GRASS as u16, 1),
+    },
+    Recipe {
+        id: "torch",
+        kind: RecipeKind::Shapeless { inputs: &[STICK, LOG as u16] },
+        out: (TORCH as u16, 4),
+    },
+    Recipe {
+        id: "rod",
+        kind: RecipeKind::Shaped { pattern: &["  S", " S ", "S  "], key: &[('S', STICK)] },
+        out: (FISHING_ROD, 1),
+    },
+    Recipe {
+        id: "car",
+        kind: RecipeKind::Shaped {
+            pattern: &["PP", "CC"],
+            key: &[('P', PLANKS as u16), ('C', COBBLE as u16)],
+        },
+        out: (CAR, 1),
     },
 ];
 
@@ -523,6 +544,40 @@ mod tests {
         assert_eq!(inv.count(STICK), 4);
         assert_eq!(inv.count(LOG as u16), 0);
         let _ = AIR;
+    }
+
+    #[test]
+    fn torch_rod_and_car_recipes_work() {
+        let mut g = empty();
+        put(&mut g, 2, STICK);
+        put(&mut g, 6, LOG as u16);
+        assert_eq!(craft_output(&g), Some((TORCH as u16, 4)));
+
+        // Olta: çapraz üç çubuk (boşluklu desen).
+        let mut g = empty();
+        for i in [2, 4, 6] {
+            put(&mut g, i, STICK);
+        }
+        assert_eq!(craft_output(&g), Some((FISHING_ROD, 1)));
+        let mut g = empty();
+        for i in [0, 1, 2] {
+            put(&mut g, i, STICK);
+        }
+        assert!(find_recipe(&g).is_none(), "yatay üç çubuk olta vermemeli");
+
+        // Araba: üstte iki tahta, altta iki parke taşı; otomatik doldurma da kurabilmeli.
+        let mut inv = Inventory::new();
+        inv.add(PLANKS as u16, 2);
+        inv.add(COBBLE as u16, 2);
+        let mut g = empty();
+        auto_fill(&mut g, &mut inv, &RECIPES[8]).unwrap();
+        assert_eq!(craft_output(&g), Some((CAR, 1)));
+        // 2×2 tahta hâlâ tezgah, 2×2 taş hâlâ tuğla verir.
+        let mut g = empty();
+        for i in [0, 1, 3, 4] {
+            put(&mut g, i, PLANKS as u16);
+        }
+        assert_eq!(find_recipe(&g).map(|r| r.id), Some("table"));
     }
 
     #[test]

@@ -215,6 +215,18 @@ pub fn build_atlas() -> Vec<u8> {
         ]
     });
 
+    // 15 — meşale ikonu: saydam zemin üstünde sap ve alev
+    paint(&mut a, crate::blocks::T_TORCH, |x, y| {
+        if (7..=8).contains(&x) && (6..=14).contains(&y) {
+            return shade([122.0, 86.0, 46.0], hash2f(x, y, 211), 0.2);
+        }
+        if (6..=9).contains(&x) && (2..=5).contains(&y) {
+            let core = (7..=8).contains(&x) && (3..=5).contains(&y);
+            return if core { [255, 236, 130, 255] } else { [246, 150, 40, 255] };
+        }
+        [0, 0, 0, 0]
+    });
+
     a
 }
 

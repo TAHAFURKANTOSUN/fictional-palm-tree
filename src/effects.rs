@@ -11,6 +11,7 @@ use crate::world::World;
 pub fn break_time(id: u8) -> Option<f64> {
     match id {
         AIR | WATER | BEDROCK => None,
+        TORCH => Some(0.08),
         LEAVES => Some(0.25),
         GLASS => Some(0.35),
         GRASS | DIRT | SAND => Some(0.55),
@@ -54,6 +55,19 @@ impl Mining {
         self.progress += dt / time;
         self.progress >= 1.0
     }
+}
+
+/// Chunk mesh'i dışında çizilen düz renkli kutu (meşale, araba, şamandıra).
+#[derive(Clone, Copy, Debug)]
+pub struct BoxInst {
+    pub center: [f64; 3],
+    /// Yarı boyutlar (x, y, z).
+    pub half: [f32; 3],
+    /// Dikey eksen etrafında dönüş (oyuncunun `yaw` kuralıyla).
+    pub yaw: f32,
+    pub color: [u8; 3],
+    /// Kendi ışığını yayar: gece kararmaz (alev).
+    pub glow: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -20,7 +20,7 @@ use web_sys::{
 };
 
 use crate::atlas::{ATLAS_COLS, ATLAS_H, ATLAS_W, TILE};
-use crate::effects::Particle;
+use crate::effects::{BoxInst, Particle};
 use crate::mat4::{self, Frustum};
 use crate::mesh::{MeshBuffers, MeshData, CORNER_SHIFT, FACES, VERTEX_BYTES};
 use crate::world::CHUNK_SIZE;
@@ -47,8 +47,10 @@ out vec2 v_uv;
 out vec3 v_col;
 out float v_dist;
 out highp vec2 v_wpos;
+out highp vec3 v_rel;
 void main() {
   vec3 p = a_pos.xyz + u_origin;
+  v_rel = p;
   gl_Position = u_viewProj * vec4(p, 1.0);
   // Dünya konumu (64 blokta bir saran): su parıltısı kamerayla kaymasın.
   v_wpos = p.xz + u_camMod;
@@ -68,7 +70,10 @@ in vec2 v_uv;
 in vec3 v_col;
 in float v_dist;
 in highp vec2 v_wpos;
+in highp vec3 v_rel;
 uniform sampler2D u_atlas;
+uniform highp vec4 u_lights[8];
+uniform int u_lightCount;
 uniform float u_water;
 uniform float u_time;
 uniform float u_light;
@@ -89,7 +94,16 @@ void main() {
                  + 0.6 * sin((w.x + w.y) * 17.0 + u_time * 2.0);
     c *= 1.0 + 0.07 * ripple;
   }
-  c *= u_light;
+  // Meşaleler: en yakın birkaç nokta ışık. Gündüz etkisizdir (ortam ışığı
+  // zaten tam), gece çevresini sıcak bir renkle aydınlatır.
+  float torch = 0.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= u_lightCount) break;
+    float d = distance(v_rel, u_lights[i].xyz) / u_lights[i].w;
+    torch = max(torch, clamp(1.0 - d, 0.0, 1.0));
+  }
+  torch = torch * torch * (3.0 - 2.0 * torch);
+  c *= max(vec3(u_light), vec3(1.0, 0.86, 0.62) * torch);
   float f = clamp((v_dist - u_fogNear) / max(u_fogFar - u_fogNear, 0.001), 0.0, 1.0);
   fragColor = vec4(mix(c, u_fogColor, f), t.a * u_opacity);
 }
@@ -241,6 +255,23 @@ out vec4 fragColor;
 void main() { fragColor = vec4(v_col, 1.0); }
 "#;
 
+/// Düz renkli kutular (meşale, araba, şamandıra): köşeler CPU'da hazırlanır.
+/// Renk baytının alfası "kendi ışığını yayar" bayrağıdır (alev gece kararmaz).
+const BOX_VS: &str = r#"#version 300 es
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec4 a_col;
+uniform mat4 u_viewProj;
+uniform float u_light;
+out vec3 v_col;
+void main() {
+  gl_Position = u_viewProj * vec4(a_pos, 1.0);
+  v_col = a_col.rgb * mix(max(u_light, 0.45), 1.0, a_col.a);
+}
+"#;
+
+/// Kutu köşesi başına bayt: konum (3×f32) + renk/bayrak (4×u8).
+const BOX_VERTEX_BYTES: usize = 16;
+
 /// Parçacık başına bayt: konum (3×f32) + boyut (f32) + renk (4×u8).
 const PARTICLE_BYTES: usize = 20;
 
@@ -250,6 +281,9 @@ pub struct FrameEffects<'a> {
     pub crack: Option<([i32; 3], f32)>,
     /// Göz suyun içinde: mavi, yakın bir sis kullanılır.
     pub underwater: bool,
+    /// Nokta ışıklar: kameraya göre konum + yarıçap. En çok 8'i kullanılır.
+    pub lights: &'a [[f32; 4]],
+    pub boxes: &'a [BoxInst],
     pub particles: &'a [Particle],
 }
 
@@ -323,6 +357,13 @@ pub struct Renderer {
     s_stars: Option<WebGlUniformLocation>,
     s_light: Option<WebGlUniformLocation>,
     p_light: Option<WebGlUniformLocation>,
+    u_lights: Option<WebGlUniformLocation>,
+    u_light_count: Option<WebGlUniformLocation>,
+    box_prog: WebGlProgram,
+    box_vao: WebGlVertexArrayObject,
+    box_vbo: WebGlBuffer,
+    b_view_proj: Option<WebGlUniformLocation>,
+    b_light: Option<WebGlUniformLocation>,
 
     /// Yoğun dizi + anahtar → indeks eşlemesi: kare başına gezinme `HashMap`
     /// araması gerektirmez.
@@ -510,6 +551,17 @@ impl Renderer {
         gl.vertex_attrib_pointer_with_i32(1, 1, GL::FLOAT, false, stride, 12);
         gl.enable_vertex_attrib_array(2);
         gl.vertex_attrib_pointer_with_i32(2, 3, GL::UNSIGNED_BYTE, true, stride, 16);
+
+        // --- kutular: parçacıklarla aynı gölgelendirici ---
+        let box_prog = link(&gl, BOX_VS, PARTICLE_FS)?;
+        let box_vao = gl.create_vertex_array().ok_or("kutu VAO oluşturulamadı")?;
+        let box_vbo = gl.create_buffer().ok_or("kutu tamponu oluşturulamadı")?;
+        gl.bind_vertex_array(Some(&box_vao));
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&box_vbo));
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 3, GL::FLOAT, false, BOX_VERTEX_BYTES as i32, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 4, GL::UNSIGNED_BYTE, true, BOX_VERTEX_BYTES as i32, 12);
         gl.bind_vertex_array(None);
 
         // Atlas her zaman 0. doku biriminde durur; örnekleyici bir kez ayarlanır.
@@ -530,6 +582,13 @@ impl Renderer {
             s_stars: su("u_stars"),
             s_light: su("u_light"),
             p_light: gl.get_uniform_location(&particle_prog, "u_light"),
+            u_lights: u("u_lights[0]"),
+            u_light_count: u("u_lightCount"),
+            b_view_proj: gl.get_uniform_location(&box_prog, "u_viewProj"),
+            b_light: gl.get_uniform_location(&box_prog, "u_light"),
+            box_prog,
+            box_vao,
+            box_vbo,
             u_fog_color: u("u_fogColor"),
             u_fog_near: u("u_fogNear"),
             u_fog_far: u("u_fogFar"),
@@ -719,6 +778,13 @@ impl Renderer {
         gl.uniform1f(self.u_time.as_ref(), time);
         gl.uniform1f(self.u_water.as_ref(), 0.0);
         gl.uniform1f(self.u_light.as_ref(), self.light);
+        let count = fx.lights.len().min(8);
+        let mut lights = [0.0f32; 32];
+        for (i, l) in fx.lights.iter().take(count).enumerate() {
+            lights[i * 4..i * 4 + 4].copy_from_slice(l);
+        }
+        gl.uniform4fv_with_f32_array(self.u_lights.as_ref(), &lights);
+        gl.uniform1i(self.u_light_count.as_ref(), count as i32);
         gl.uniform1f(self.u_fog_near.as_ref(), fog_near);
         gl.uniform1f(self.u_fog_far.as_ref(), fog_far);
         gl.active_texture(GL::TEXTURE0);
@@ -781,6 +847,47 @@ impl Renderer {
         gl.bind_vertex_array(Some(&self.sky_vao));
         gl.draw_arrays(GL::TRIANGLES, 0, sky_vertices);
         gl.depth_mask(true);
+
+        // 2a) Kutular (meşale, araba, şamandıra): opak, derinliğe yazar.
+        if !fx.boxes.is_empty() {
+            let mut bytes: Vec<u8> = Vec::with_capacity(fx.boxes.len() * 36 * BOX_VERTEX_BYTES);
+            for b in fx.boxes {
+                let (sin, cos) = b.yaw.sin_cos();
+                let rel = [
+                    (b.center[0] - cam_pos[0]) as f32,
+                    (b.center[1] - cam_pos[1]) as f32,
+                    (b.center[2] - cam_pos[2]) as f32,
+                ];
+                for face in FACES.iter() {
+                    let col = [
+                        (b.color[0] as f32 * face.shade) as u8,
+                        (b.color[1] as f32 * face.shade) as u8,
+                        (b.color[2] as f32 * face.shade) as u8,
+                        if b.glow { 255 } else { 0 },
+                    ];
+                    for corner in [0usize, 1, 2, 0, 2, 3] {
+                        let v = face.verts[corner];
+                        let lx = (v[0] as f32 * 2.0 - 1.0) * b.half[0];
+                        let ly = (v[1] as f32 * 2.0 - 1.0) * b.half[1];
+                        let lz = (v[2] as f32 * 2.0 - 1.0) * b.half[2];
+                        // Yerel -Z, `yaw` ile oyuncunun ileri yönüne döner.
+                        let p = [rel[0] + lx * cos + lz * sin, rel[1] + ly, rel[2] - lx * sin + lz * cos];
+                        for c in p {
+                            bytes.extend_from_slice(&c.to_le_bytes());
+                        }
+                        bytes.extend_from_slice(&col);
+                    }
+                }
+            }
+            gl.use_program(Some(&self.box_prog));
+            gl.uniform_matrix4fv_with_f32_array(self.b_view_proj.as_ref(), false, &view_proj);
+            gl.uniform1f(self.b_light.as_ref(), self.light);
+            gl.bind_vertex_array(Some(&self.box_vao));
+            gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.box_vbo));
+            gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, &bytes, GL::DYNAMIC_DRAW);
+            gl.draw_arrays(GL::TRIANGLES, 0, (fx.boxes.len() * 36) as i32);
+            gl.bind_buffer(GL::ARRAY_BUFFER, None);
+        }
 
         // 2b) Kırma efektleri: parçacıklar opak, çatlak kaplaması harmanlı.
         //     Sudan önce çizilirler ki su altındaki blokta suyun arkasında kalsınlar.

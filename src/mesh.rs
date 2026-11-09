@@ -357,7 +357,7 @@ pub fn build_chunk_mesh_into(world: &World, cx: i32, cz: i32, out: &mut MeshBuff
             for x in 0..size {
                 let i = row + x;
                 let id = pad[i];
-                if id == AIR {
+                if !is_cube(id) {
                     continue;
                 }
 
@@ -513,6 +513,17 @@ mod tests {
             }
         }
         assert!(quads > 500, "beklenenden az yüz denetlendi: {quads}");
+    }
+
+    /// Meşale küp olarak çizilmez ve altındaki bloğun üst yüzünü gizlemez.
+    #[test]
+    fn torches_add_no_cube_faces() {
+        let mut w = test_world(20261012);
+        let h = w.height_at(8, 8);
+        let (before, _) = build_chunk_mesh(&w, 0, 0).unwrap();
+        assert!(w.set_block_raw(8, h + 1, 8, TORCH));
+        let (after, _) = build_chunk_mesh(&w, 0, 0).unwrap();
+        assert_eq!(before.verts, after.verts, "meşale mesh'i değiştirmemeli");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Bu modül bilerek **dünyadan bağımsızdır**: kare başına durum `TickInput`
 //! ile dışarıdan verilir. Böylece tüm kurallar tarayıcı olmadan test edilebilir.
 
-use crate::blocks::APPLE;
+use crate::blocks::item_def;
 use crate::inventory::{Inventory, Slots};
 
 pub const MAX_HEALTH: i32 = 20; // 10 kalp
@@ -217,7 +217,8 @@ impl Survival {
             self.events.push(Event::NoFood);
             return false;
         };
-        if stack.id != APPLE {
+        let food = item_def(stack.id).map(|d| d.food).unwrap_or(0);
+        if food <= 0 {
             self.events.push(Event::NoFood);
             return false;
         }
@@ -229,7 +230,7 @@ impl Survival {
             return false;
         }
         inv.consume_selected();
-        self.hunger = (self.hunger + 6).min(MAX_HUNGER);
+        self.hunger = (self.hunger + food).min(MAX_HUNGER);
         self.exhaustion = (self.exhaustion - 4.0).max(0.0);
         self.eat_cooldown = 0.6;
         self.events.push(Event::Ate);
@@ -349,6 +350,7 @@ impl Survival {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::APPLE;
     use crate::inventory::{Stack, MAX_STACK};
 
     fn tick_for(s: &mut Survival, seconds: f64, base: TickInput) {
@@ -614,6 +616,18 @@ mod tests {
         inv.select(0);
         assert!(!s.try_eat(&mut inv));
         assert!(s.take_events().contains(&Event::NoFood));
+    }
+
+    #[test]
+    fn fish_restores_five_hunger() {
+        let mut s = Survival::new();
+        let mut inv = Inventory::new();
+        inv.slots[0] = Some(Stack::new(crate::blocks::FISH, 2));
+        inv.select(0);
+        s.hunger = 10;
+        assert!(s.try_eat(&mut inv));
+        assert_eq!(s.hunger, 15);
+        assert_eq!(inv.count(crate::blocks::FISH), 1);
     }
 
     #[test]

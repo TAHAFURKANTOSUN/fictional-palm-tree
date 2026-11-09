@@ -18,10 +18,16 @@ pub const GLASS: u8 = 10;
 pub const WATER: u8 = 11;
 pub const BEDROCK: u8 = 12;
 pub const CRAFT_TABLE: u8 = 13;
+/// Meşale: chunk verisinde durur ama küp olarak çizilmez (küçük bir model
+/// olarak ayrıca çizilir), içinden geçilir ve çevresini aydınlatır.
+pub const TORCH: u8 = 14;
 
 /// Yalnızca eşya olan kimlikler (blok değildir).
 pub const STICK: u16 = 100;
 pub const APPLE: u16 = 101;
+pub const FISHING_ROD: u16 = 102;
+pub const FISH: u16 = 103;
+pub const CAR: u16 = 104;
 
 /// Doku atlasındaki döşeme indeksleri.
 pub const T_GRASS_TOP: u8 = 0;
@@ -39,6 +45,8 @@ pub const T_GLASS: u8 = 11;
 pub const T_WATER: u8 = 12;
 pub const T_CRAFT_TOP: u8 = 13;
 pub const T_CRAFT_SIDE: u8 = 14;
+/// Yalnızca envanter ikonu olarak kullanılır.
+pub const T_TORCH: u8 = 15;
 
 /// Bir bloğun görsel ve fiziksel özellikleri.
 #[derive(Clone, Copy)]
@@ -76,7 +84,7 @@ const fn liquid_def(
     BlockDef { name, top, bottom, side, transparent: true, liquid: true, tint, vary: false }
 }
 
-const BLOCK_COUNT: usize = 14;
+const BLOCK_COUNT: usize = 15;
 
 static BLOCK_DEFS: [BlockDef; BLOCK_COUNT] = BLOCK_TABLE;
 
@@ -96,6 +104,7 @@ const BLOCK_TABLE: [BlockDef; BLOCK_COUNT] = [
     liquid_def("Su", T_WATER, T_WATER, T_WATER, [1.0, 1.0, 1.0]),
     def("Ana Kaya", T_STONE, T_STONE, T_STONE, false, [0.42, 0.42, 0.45], false),
     def("Çalışma Tezgahı", T_CRAFT_TOP, T_PLANKS, T_CRAFT_SIDE, false, [1.0, 1.0, 1.0], false),
+    def("Meşale", T_TORCH, T_TORCH, T_TORCH, true, [1.0, 1.0, 1.0], false),
 ];
 
 /// Blok tanımını döndürür; geçersiz kimlikte `Hava` tanımı verilir.
@@ -131,7 +140,13 @@ pub fn is_opaque(id: u8) -> bool {
 /// Su ve hava dışındaki her blok katıdır (oyuncu çarpışması için).
 #[inline]
 pub fn is_solid(id: u8) -> bool {
-    id != AIR && !block_def(id).liquid
+    id != AIR && id != TORCH && !block_def(id).liquid
+}
+
+/// Chunk mesh'ine küp olarak giren blok mu? (Meşale ayrı bir modelle çizilir.)
+#[inline]
+pub fn is_cube(id: u8) -> bool {
+    id != AIR && id != TORCH
 }
 
 #[inline]
@@ -146,6 +161,9 @@ pub enum Icon {
     Tile(u8),
     Cubuk,
     Elma,
+    Olta,
+    Balik,
+    Araba,
 }
 
 /// Eşya tanımı (bloklar ve yalnızca eşya olanlar için ortak).
@@ -161,13 +179,16 @@ pub struct ItemDef {
 
 /// Kimliğe göre eşya tanımı.
 pub fn item_def(id: u16) -> Option<ItemDef> {
-    if id <= CRAFT_TABLE as u16 {
+    if (id as usize) < BLOCK_COUNT {
         let b = block_def(id as u8);
         Some(ItemDef { name: b.name, icon: Icon::Tile(b.side), placeable: Some(id as u8), food: 0 })
     } else {
         match id {
             STICK => Some(ItemDef { name: "Çubuk", icon: Icon::Cubuk, placeable: None, food: 0 }),
             APPLE => Some(ItemDef { name: "Elma", icon: Icon::Elma, placeable: None, food: 6 }),
+            FISHING_ROD => Some(ItemDef { name: "Olta", icon: Icon::Olta, placeable: None, food: 0 }),
+            FISH => Some(ItemDef { name: "Balık", icon: Icon::Balik, placeable: None, food: 5 }),
+            CAR => Some(ItemDef { name: "Araba", icon: Icon::Araba, placeable: None, food: 0 }),
             _ => None,
         }
     }
@@ -232,6 +253,23 @@ mod tests {
         assert_eq!(item_def(APPLE).unwrap().placeable, None);
         assert_eq!(item_def(APPLE).unwrap().food, 6);
         assert_eq!(item_name(APPLE), "Elma");
+    }
+
+    #[test]
+    fn torch_is_a_walk_through_block_that_is_not_meshed() {
+        assert!(!is_solid(TORCH), "meşalenin içinden geçilebilmeli");
+        assert!(!is_opaque(TORCH) && !is_cube(TORCH));
+        assert!(is_cube(STONE) && !is_cube(AIR));
+        assert_eq!(item_def(TORCH as u16).unwrap().placeable, Some(TORCH));
+        assert_eq!(item_name(TORCH as u16), "Meşale");
+    }
+
+    #[test]
+    fn fish_is_food_and_tools_are_not_placeable() {
+        assert_eq!(item_def(FISH).unwrap().food, 5);
+        for id in [FISHING_ROD, FISH, CAR] {
+            assert_eq!(item_def(id).unwrap().placeable, None);
+        }
     }
 
     #[test]

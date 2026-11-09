@@ -164,15 +164,15 @@ async function main() {
   expect('tokken iyileşme: can 8\'den artar, 12\'yi geçmez', out.regenHealth > 8 && out.regenHealth <= 12,
     out.regenHealth);
 
-  // ---- 6) Yaratıcı mod: hasar yok, 13 yuva x64, uçuş açık ----
+  // ---- 6) Yaratıcı mod: hasar yok, 17 yuva x64, uçuş açık ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_mode(true); 1`);
   await sleep(200);
   let st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.creative = { mode: st.mode, flying: st.flying, slots: st.slots.filter(s => s).length, first: st.slots[0] };
   await evalJs(`window.__vcRs.debug_damage(10); 1`);
   out.creativeDamageIgnored = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health === 20;
-  expect('yaratıcı mod: uçuş açık, 13 yuva × 64',
-    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 13 &&
+  expect('yaratıcı mod: uçuş açık, 17 yuva × 64',
+    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 17 &&
       out.creative.first?.[0] === 1 && out.creative.first?.[1] === 64, out.creative);
   expect('yaratıcı modda hasar yok', out.creativeDamageIgnored);
 
@@ -243,6 +243,57 @@ async function main() {
     expect('kazma: blok anında değil, ilerleyerek kırılır', progressed);
     expect('kazma: kırılınca parçacık saçılır', burst);
     expect('kazma: tık bırakılınca ilerleme sıfırlanır', s.mining === 0, s.mining);
+  }
+
+  // ---- 11c) Meşale, araba, olta ----
+  {
+    const v = 'window.__vcRs';
+    // Meşale: elde tutunca ışık verir; yere konunca listeye girer ve bir adet eksilir.
+    await evalJs(`${v}.debug_set_slot(0, 14, 8); ${v}.debug_set_slot(2, 104, 1); ${v}.debug_select(0); ${v}.debug_set_look(1.3, -0.4); 1`);
+    await sleep(400);
+    const held = await state();
+    for (let i = 0; i < 12 && (await state()).torches === 0; i++) {
+      await evalJs(`${v}.debug_set_look(${1.3 + i * 0.52}, -0.4); 1`);
+      await sleep(250);
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(250);
+    }
+    const placed = await state();
+    out.torch = { heldLights: held.lights, torches: placed.torches, left: placed.slots[0] };
+    expect('meşale: elde ışık verir', held.lights >= 1, out.torch);
+    expect('meşale: konunca dünyaya eklenir ve harcanır', placed.torches === 1 && placed.slots[0]?.[1] === 7, out.torch);
+
+    // Araba: yere bırak, R ile bin, W ile sür, R ile in.
+    // Arazi rastgele: arabanın sığdığı bir yön bulunana kadar çevreye bakılır.
+    let carYaw = 3.4;
+    await evalJs(`${v}.debug_select(2); 1`);
+    for (let i = 0; i < 12 && (await state()).cars === 0; i++) {
+      carYaw = 3.4 + i * 0.52;
+      await evalJs(`${v}.debug_set_look(${carYaw}, -0.45); 1`);
+      await sleep(250);
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(250);
+    }
+    const key = (code, type) => evalJs(`window.dispatchEvent(new KeyboardEvent('${type}', { code: '${code}', bubbles: true })); 1`);
+    await key('KeyR', 'keydown'); await key('KeyR', 'keyup');
+    await sleep(300);
+    const mounted = await state();
+    await evalJs(`${v}.debug_set_look(${carYaw}, -0.1); 1`);
+    await key('KeyW', 'keydown');
+    await sleep(2500);
+    await key('KeyW', 'keyup');
+    const drove = await state();
+    await sleep(1500);
+    await key('KeyR', 'keydown'); await key('KeyR', 'keyup');
+    await sleep(300);
+    const off = await state();
+    const dist = Math.hypot(drove.pos[0] - mounted.pos[0], drove.pos[2] - mounted.pos[2]);
+    out.car = { cars: mounted.cars, mounted: mounted.driving, dist: Number(dist.toFixed(1)), dismounted: !off.driving };
+    expect('araba: yere bırakılır ve binilir', mounted.cars === 1 && mounted.driving === true, out.car);
+    expect('araba: gazla ilerler', dist > 2, out.car);
+    expect('araba: R ile inilir', off.driving === false, out.car);
+    // Sonraki adımlar başlangıç envanterini ve duran bir oyuncuyu bekler.
+    await evalJs(`${v}.debug_set_slot(0, 1, 16); ${v}.debug_set_slot(2, 3, 24); ${v}.debug_select(8); 1`);
   }
 
   // ---- 12) FPS + çizim (yatay bakış) ----
@@ -365,6 +416,25 @@ async function main() {
     out.swim.sinkDrop = Number((afterUp.pos[1] - sink.pos[1]).toFixed(2));
     if (out.swim.sinkDrop > 4.0) {
       problems.push(`H6: suda batma çok hızlı (0,9 sn'de ${out.swim.sinkDrop} blok)`);
+    }
+
+    // Olta: suya atılır, balık vurunca çekilir.
+    {
+      const v = 'window.__vcRs';
+      await evalJs(`${v}.debug_set_slot(3, 102, 1); ${v}.debug_select(3); ${v}.debug_set_look(0.8, -1.2); 1`);
+      await sleep(300);
+      const fishBefore = await evalJs(`${v}.debug_count(103)`);
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(300);
+      const cast = (await state()).fishing;
+      let bit = false;
+      for (let i = 0; i < 900 && !bit; i++) { bit = (await state()).fishing === 'biting'; if (!bit) await sleep(40); }
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(200);
+      const fish = (await evalJs(`${v}.debug_count(103)`)) - fishBefore;
+      out.fishing = { cast, bit, fish };
+      expect('olta: suya atılır', cast === 'waiting', out.fishing);
+      expect('olta: balık vurunca çekilir ve envantere girer', bit && fish === 1, out.fishing);
     }
   }
 

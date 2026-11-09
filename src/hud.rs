@@ -432,6 +432,39 @@ impl Hud {
                 ctx.set_fill_style_str("#e2564a");
                 ctx.fill_rect(x + size * 0.26, y + size * 0.40, size * 0.16, size * 0.26);
             }
+            Icon::Olta => {
+                // Çapraz kamış + ip + kırmızı şamandıra.
+                let step = size / 9.0;
+                ctx.set_fill_style_str("#a67c45");
+                for i in 0..8 {
+                    ctx.fill_rect(x + size * 0.08 + i as f64 * step, y + size * 0.82 - i as f64 * step, step * 1.2, step * 1.2);
+                }
+                ctx.set_fill_style_str("#e8eef5");
+                ctx.fill_rect(x + size * 0.86, y + size * 0.12, size * 0.04, size * 0.5);
+                ctx.set_fill_style_str("#d8382e");
+                ctx.fill_rect(x + size * 0.80, y + size * 0.60, size * 0.16, size * 0.16);
+            }
+            Icon::Balik => {
+                ctx.set_fill_style_str("#5fa8c8");
+                ctx.fill_rect(x + size * 0.22, y + size * 0.34, size * 0.52, size * 0.34);
+                ctx.fill_rect(x + size * 0.32, y + size * 0.26, size * 0.32, size * 0.5);
+                // Kuyruk
+                ctx.fill_rect(x + size * 0.06, y + size * 0.28, size * 0.16, size * 0.46);
+                ctx.set_fill_style_str("#3d7f9e");
+                ctx.fill_rect(x + size * 0.32, y + size * 0.26, size * 0.32, size * 0.08);
+                ctx.set_fill_style_str("#10202a");
+                ctx.fill_rect(x + size * 0.62, y + size * 0.40, size * 0.08, size * 0.08);
+            }
+            Icon::Araba => {
+                ctx.set_fill_style_str("#c8382c");
+                ctx.fill_rect(x + size * 0.06, y + size * 0.46, size * 0.88, size * 0.26);
+                ctx.fill_rect(x + size * 0.26, y + size * 0.24, size * 0.44, size * 0.24);
+                ctx.set_fill_style_str("#bfe3f5");
+                ctx.fill_rect(x + size * 0.32, y + size * 0.29, size * 0.32, size * 0.15);
+                ctx.set_fill_style_str("#1c1c1c");
+                ctx.fill_rect(x + size * 0.14, y + size * 0.66, size * 0.20, size * 0.20);
+                ctx.fill_rect(x + size * 0.64, y + size * 0.66, size * 0.20, size * 0.20);
+            }
         }
     }
 
