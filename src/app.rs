@@ -20,6 +20,7 @@ use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
 use crate::mesh::{self, MeshBuffers};
+use crate::pacing::QualityGovernor;
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
 use crate::survival::{Event, GameMode, Survival, TickInput};
@@ -28,7 +29,15 @@ use crate::world::{ckey, stream_plan, World, CHUNK_SIZE, KEEP_MARGIN};
 const FOV_Y: f32 = 76.0_f32.to_radians();
 const MIN_RENDER_DIST: i32 = 3;
 const MAX_RENDER_DIST: i32 = 16;
-const WORK_BUDGET_MS: f64 = 4.0;
+/// Chunk akışına kare başına ayrılan süre. Kare zaten geç kalıyorsa
+/// (≈45 FPS altı) bütçe kısılır: akış biraz yavaşlar ama kare düşmez.
+const WORK_BUDGET_MS: f64 = 2.5;
+const WORK_BUDGET_LATE_MS: f64 = 1.0;
+const LATE_FRAME_S: f64 = 0.022;
+/// Kare başına boşaltılan en fazla chunk (GPU nesnesi silme tek kareye yığılmasın).
+const UNLOADS_PER_FRAME: usize = 32;
+/// Yerde hızlanma/yavaşlama katsayısı (1/sn): hız hedefe ≈50 ms'de yaklaşır.
+const GROUND_ACCEL: f64 = 20.0;
 const SENSITIVITY: f64 = 0.0022;
 /// Ölçüm panelindeki sayıların (konum, çizim sayısı…) yenilenme aralığı.
 /// Her karede yenilenseydi arayüz de her karede yeniden çizilirdi.
@@ -89,6 +98,17 @@ struct Game {
     last_pcx: i32,
     last_pcz: i32,
 
+    /// Boşaltılmayı bekleyen chunk'lar (karelere yayılır).
+    doomed: Vec<(i32, i32)>,
+    /// Son karenin gerçek süresi (sn); akış bütçesini belirler.
+    last_frame_dt: f64,
+    governor: QualityGovernor,
+    render_scale: f32,
+    gov_time: f64,
+    gov_frames: u32,
+    plan_dist: i32,
+    plan_data: Vec<(i32, i32, i32)>,
+    plan_mesh: Vec<(i32, i32, i32)>,
     want_data: Vec<(i32, i32, i32)>,
     want_mesh: Vec<(i32, i32, i32)>,
     data_idx: usize,
@@ -136,7 +156,16 @@ impl Game {
     // ---------------------------------------------------------------
 
     fn rebuild_want(&mut self, pcx: i32, pcz: i32) {
-        stream_plan(pcx, pcz, self.render_dist, &mut self.want_data, &mut self.want_mesh);
+        // Sıralı ofset listeleri yalnızca görüş mesafesi değişince hesaplanır;
+        // chunk sınırı her geçildiğinde yalnızca ötelenir.
+        if self.plan_dist != self.render_dist {
+            self.plan_dist = self.render_dist;
+            stream_plan(0, 0, self.render_dist, &mut self.plan_data, &mut self.plan_mesh);
+        }
+        self.want_data.clear();
+        self.want_data.extend(self.plan_data.iter().map(|&(x, z, d)| (pcx + x, pcz + z, d)));
+        self.want_mesh.clear();
+        self.want_mesh.extend(self.plan_mesh.iter().map(|&(x, z, d)| (pcx + x, pcz + z, d)));
         self.data_idx = 0;
         self.mesh_idx = 0;
     }
@@ -158,7 +187,7 @@ impl Game {
     fn cleanup_chunks(&mut self, pcx: i32, pcz: i32) {
         let keep = (self.render_dist + KEEP_MARGIN) as i64;
         let k2 = keep * keep;
-        let doomed: Vec<u64> = self
+        self.doomed = self
             .world
             .chunks
             .values()
@@ -170,11 +199,23 @@ impl Game {
                 let dz = ch.cz as i64 - pcz as i64;
                 dx * dx + dz * dz > k2
             })
-            .map(|ch| ckey(ch.cx, ch.cz))
+            .map(|ch| (ch.cx, ch.cz))
             .collect();
-        for key in doomed {
-            self.world.unload_chunk(key);
-            self.renderer.remove_chunk(key);
+    }
+
+    /// Bekleyen boşaltmaların bir kısmını yapar. Oyuncu bu arada geri
+    /// döndüyse yeniden menzile giren chunk'lar atlanır.
+    fn unload_some(&mut self, pcx: i32, pcz: i32) {
+        let keep = (self.render_dist + KEEP_MARGIN) as i64;
+        for _ in 0..UNLOADS_PER_FRAME {
+            let Some((cx, cz)) = self.doomed.pop() else { return };
+            let dx = cx as i64 - pcx as i64;
+            let dz = cz as i64 - pcz as i64;
+            if dx * dx + dz * dz > keep * keep {
+                let key = ckey(cx, cz);
+                self.world.unload_chunk(key);
+                self.renderer.remove_chunk(key);
+            }
         }
     }
 
@@ -182,6 +223,9 @@ impl Game {
     fn update_chunks(&mut self) {
         let pcx = (self.player.pos[0] / CHUNK_SIZE as f64).floor() as i32;
         let pcz = (self.player.pos[2] / CHUNK_SIZE as f64).floor() as i32;
+        // Süre, sınır geçişindeki liste yenilemeyi de kapsar: o karede akışa
+        // daha az iş kalır.
+        let t0 = self.now_ms();
 
         if pcx != self.last_pcx || pcz != self.last_pcz || self.force_restream {
             self.last_pcx = pcx;
@@ -191,26 +235,26 @@ impl Game {
             self.cleanup_chunks(pcx, pcz);
         }
 
-        let t0 = self.now_ms();
+        self.unload_some(pcx, pcz);
+
+        let budget = if self.last_frame_dt > LATE_FRAME_S { WORK_BUDGET_LATE_MS } else { WORK_BUDGET_MS };
 
         // 1) Veri üretimi: mesh'lenecek chunk'lar ve onların tüm komşuları.
-        let mut it = 0;
+        //    Bütçe her gerçek işten sonra denetlenir (taşma en fazla bir chunk).
         while self.data_idx < self.want_data.len() {
             let (cx, cz, _) = self.want_data[self.data_idx];
             self.data_idx += 1;
             if !self.world.chunks.contains_key(&ckey(cx, cz)) {
                 self.world.generate_chunk(cx, cz);
-            }
-            it += 1;
-            if it & 7 == 0 && self.now_ms() - t0 > WORK_BUDGET_MS {
-                return;
+                if self.now_ms() - t0 > budget {
+                    return;
+                }
             }
         }
 
         // 2) Mesh üretimi. Veri aşaması bittiği için her chunk'ın 8 komşusu
         //    hazırdır; yine de biri eksikse o chunk atlanır (sıradakileri
         //    bekletmez) ve bir sonraki akış yenilemesinde tekrar denenir.
-        let mut it = 0;
         while self.mesh_idx < self.want_mesh.len() {
             let (cx, cz, _) = self.want_mesh[self.mesh_idx];
             self.mesh_idx += 1;
@@ -222,10 +266,9 @@ impl Game {
                 .unwrap_or(false);
             if needs_mesh {
                 self.mesh_chunk(cx, cz);
-            }
-            it += 1;
-            if it & 3 == 0 && self.now_ms() - t0 > WORK_BUDGET_MS {
-                return;
+                if self.now_ms() - t0 > budget {
+                    return;
+                }
             }
         }
     }
@@ -510,8 +553,10 @@ impl Game {
         let frame_dt = ((now - self.last_time) / 1000.0).max(0.0);
         let dt = frame_dt.min(0.05);
         self.last_time = now;
+        self.last_frame_dt = frame_dt;
         self.time += dt as f32;
         self.update_stats(frame_dt);
+        self.update_quality(frame_dt);
 
         if self.booting {
             self.boot_step();
@@ -540,6 +585,30 @@ impl Game {
         self.drain_events();
         self.hud.tick(dt);
         self.present();
+    }
+
+    /// Kare hızı düşükse 3B tuvalin çözünürlüğünü kademeli olarak ayarlar
+    /// (bkz. `pacing`). Açılışta ve sekme arka plandayken örnek alınmaz.
+    fn update_quality(&mut self, frame_dt: f64) {
+        if self.booting || !self.started || frame_dt >= 1.0 {
+            self.gov_time = 0.0;
+            self.gov_frames = 0;
+            return;
+        }
+        self.gov_time += frame_dt;
+        self.gov_frames += 1;
+        if self.gov_time < 1.0 {
+            return;
+        }
+        let fps = self.gov_frames as f64 / self.gov_time;
+        self.gov_time = 0.0;
+        self.gov_frames = 0;
+        if let Some(scale) = self.governor.sample(fps) {
+            self.render_scale = scale;
+            resize_canvases(self);
+            let msg = format!("Çözünürlük: %{:.0}", scale * 100.0);
+            self.hud.toast(msg);
+        }
     }
 
     /// FPS sayacını ve ölçüm panelinin örneklenen sayılarını günceller.
@@ -630,8 +699,11 @@ impl Game {
             self.player.vel[0] += (mx * speed - self.player.vel[0]) * b;
             self.player.vel[2] += (mz * speed - self.player.vel[2]) * b;
         } else {
-            self.player.vel[0] = mx * speed;
-            self.player.vel[2] = mz * speed;
+            // Yerde hız anında değil, çok kısa bir ivmeyle değişir: yön
+            // değiştirirken ve dururken kamera sıçramaz.
+            let b = (dt * GROUND_ACCEL).min(1.0);
+            self.player.vel[0] += (mx * speed - self.player.vel[0]) * b;
+            self.player.vel[2] += (mz * speed - self.player.vel[2]) * b;
         }
 
         self.jumped = false;
@@ -1081,7 +1153,7 @@ pub fn debug_state_json() -> String {
                 "\"pos\":[{:.2},{:.2},{:.2}],\"yaw\":{:.3},\"pitch\":{:.3},",
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
                 "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
-                "\"mining\":{:.2},\"particles\":{},",
+                "\"mining\":{:.2},\"particles\":{},\"renderScale\":{:.2},",
                 "\"slots\":[{}]",
                 "}}"
             ),
@@ -1122,6 +1194,7 @@ pub fn debug_state_json() -> String {
             g.player.feet_in_water(&g.world),
             g.mining.progress,
             g.particles.list.len(),
+            g.render_scale,
             slots.join(",")
         )
     })
@@ -1302,12 +1375,16 @@ fn resize_canvases(game: &mut Game) {
     for id in ["gl", "hud"] {
         if let Some(el) = game.document.get_element_by_id(id) {
             if let Some(c) = el.dyn_ref::<HtmlCanvasElement>() {
-                c.set_width(w as u32);
-                c.set_height(h as u32);
+                // 3B tuval uyarlanabilir çözünürlükte çizilir, CSS ile
+                // pencereye gerilir; arayüz her zaman tam çözünürlüktedir.
+                let s = if id == "gl" { game.render_scale as f64 } else { 1.0 };
+                c.set_width(((w * s) as u32).max(1));
+                c.set_height(((h * s) as u32).max(1));
             }
         }
     }
-    game.renderer.resize(w as i32, h as i32);
+    let s = game.render_scale as f64;
+    game.renderer.resize(((w * s) as i32).max(1), ((h * s) as i32).max(1));
     game.hud.resize(w, h);
 }
 
@@ -1385,6 +1462,15 @@ pub fn start() -> Result<(), JsValue> {
         force_restream: false,
         last_pcx: pcx,
         last_pcz: pcz,
+        doomed: Vec::new(),
+        last_frame_dt: 0.0,
+        governor: QualityGovernor::default(),
+        render_scale: 1.0,
+        gov_time: 0.0,
+        gov_frames: 0,
+        plan_dist: -1,
+        plan_data: Vec::new(),
+        plan_mesh: Vec::new(),
         want_data: Vec::new(),
         want_mesh: Vec::new(),
         data_idx: 0,

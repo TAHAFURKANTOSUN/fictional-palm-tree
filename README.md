@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-137%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-142%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -53,7 +53,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **137 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **142 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -161,7 +161,7 @@ Motor bilerek iki katmana ayrıldı:
 
 | Katman | Modüller | Özellik |
 |---|---|---|
-| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
+| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `pacing`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
 | **Tarayıcı katmanı** | `app`, `gl`, `hud` | Yalnızca `wasm32` hedefinde derlenir (`#[cfg(target_arch = "wasm32")]`) |
 
 Bu ayrım sayesinde oyunun **tüm kuralları** (arazi sürekliliği, mesh üretimi,
@@ -228,6 +228,11 @@ flowchart LR
 - **Arayüz** — Canvas2D arayüzü her karede değil, yalnızca gösterdiği durum
   değiştiğinde yeniden çizilir (tam çizim ≈2000 Canvas2D çağrısıdır).
 
+- **Kare hızı koruması** — chunk akışı kare başına 2,5 ms ile sınırlıdır
+  (kare geç kalıyorsa 1 ms), boşaltmalar karelere yayılır. FPS yine de 50'nin
+  altında kalırsa 3B tuvalin çözünürlüğü kademeli düşürülür (%85 → %70 → %55);
+  düşürme FPS'i artırmıyorsa geri alınır, yük kalkınca tam çözünürlüğe dönülür.
+
 ### 📁 Proje yapısı
 
 ```text
@@ -250,6 +255,7 @@ voxelcraft-rs/
 │   ├── crafting.rs       # 3×3 şekilli/şekilsiz tarifler
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
 │   ├── effects.rs        # kazma ilerlemesi + kırılma parçacıkları
+│   ├── pacing.rs         # uyarlanabilir çözünürlük (kare hızı koruması)
 │   ├── mat4.rs           # 4×4 matrisler + görüş konisi (frustum)
 │   ├── gl.rs             # WebGL2 çizici (gölgelendiriciler, VAO/VBO)
 │   ├── hud.rs            # Canvas2D arayüzü (kalpler, çubuk, envanter ekranı)
@@ -265,7 +271,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 137 test
+cargo test --lib          # 142 test
 ```
 
 <details>
