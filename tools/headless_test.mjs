@@ -24,6 +24,9 @@
 //
 // Ortam değişkenleriyle özelleştirilebilir:
 //   CDP_PORT (varsayılan 9334), TARGET_URL (varsayılan http://127.0.0.1:8799/index.html)
+//
+// Çıkış kodu: tüm denetimler geçtiyse 0; bir denetim başarısızsa ya da konsola
+// hata düştüyse 1 (ayrıntılar çıktıdaki `problems` listesindedir).
 
 import fs from 'fs';
 
@@ -112,6 +115,28 @@ async function main() {
   const out = {};
   out.boot = boot;
 
+  // Beklenti tutmazsa `problems` listesine yazar; test sonunda çıkış kodu
+  // buna göre belirlenir.
+  const expect = (name, ok, detail) => {
+    if (!ok) problems.push(`BEKLENTİ: ${name}` + (detail === undefined ? '' : ` — ${JSON.stringify(detail)}`));
+  };
+  const state = async () => JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+  // Chunk akışı yetişene kadar bekler (yavaş makinelerde sabit bekleme yetmeyebilir).
+  const waitForStreaming = async (ms = 20000) => {
+    let s = await state();
+    for (let waited = 0; s.meshPending > 0 && waited < ms; waited += 250) {
+      await sleep(250);
+      s = await state();
+    }
+    return s;
+  };
+
+  // Görüş mesafesindeki her chunk mesh'lenmiş olmalı. (Eskiden dairenin
+  // kenarındaki chunk'ların çapraz komşuları üretilmediği için bunlar hiç
+  // çizilemiyordu.)
+  expect('açılışta görüş mesafesindeki tüm chunk\'lar mesh\'lendi', boot.meshPending === 0,
+    { wantMesh: boot.wantMesh, meshPending: boot.meshPending });
+
   // ---- 1) Oyna düğmesine bas (başlat) ----
   await evalJs(`document.getElementById('startBtn').click()`);
   await sleep(600);
@@ -120,18 +145,24 @@ async function main() {
   // ---- 2) Başlangıç kiti ----
   out.starterGrass = await evalJs(`window.__vcRs.debug_count(1)`);
   out.starterApple = await evalJs(`window.__vcRs.debug_count(101)`);
+  expect('başlangıç kiti: 16 çim, 3 elma', out.starterGrass === 16 && out.starterApple === 3,
+    [out.starterGrass, out.starterApple]);
 
   // ---- 3) Hasar ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_damage(6); 1`);
   out.afterDamage = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health;
+  expect('6 hasar: can 20 → 14', out.afterDamage === 14, out.afterDamage);
 
   // ---- 4) Yıldız açlığı: 20 sn simülasyon ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_hunger(0); window.__vcRs.debug_sim(20); 1`);
   out.starvedHealth = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health;
+  expect('20 sn yıldız açlığı: can 20 → 15', out.starvedHealth === 15, out.starvedHealth);
 
   // ---- 5) Tokken iyileşme ----
   await evalJs(`window.__vcRs.debug_set_health(8); window.__vcRs.debug_set_hunger(20); window.__vcRs.debug_sim(20); 1`);
   out.regenHealth = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health;
+  expect('tokken iyileşme: can 8\'den artar, 12\'yi geçmez', out.regenHealth > 8 && out.regenHealth <= 12,
+    out.regenHealth);
 
   // ---- 6) Yaratıcı mod: hasar yok, 13 yuva x64, uçuş açık ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_mode(true); 1`);
@@ -140,12 +171,19 @@ async function main() {
   out.creative = { mode: st.mode, flying: st.flying, slots: st.slots.filter(s => s).length, first: st.slots[0] };
   await evalJs(`window.__vcRs.debug_damage(10); 1`);
   out.creativeDamageIgnored = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health === 20;
+  expect('yaratıcı mod: uçuş açık, 13 yuva × 64',
+    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 13 &&
+      out.creative.first?.[0] === 1 && out.creative.first?.[1] === 64, out.creative);
+  expect('yaratıcı modda hasar yok', out.creativeDamageIgnored);
 
   // ---- 7) Hayatta kalmaya dönüş: envanter geri gelir ----
   await evalJs(`window.__vcRs.debug_set_mode(false); 1`);
   await sleep(200);
   st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.backToSurvival = { mode: st.mode, flying: st.flying, grass: st.slots[0] };
+  expect('hayatta kalmaya dönüş: uçuş kapalı, envanter geri geldi',
+    st.mode === 'Hayatta Kalma' && st.flying === false && st.slots[0]?.[0] === 1 && st.slots[0]?.[1] === 16,
+    out.backToSurvival);
 
   // ---- 8) Blok kır / koy (aşağı bak) ----
   await evalJs(`window.__vcRs.debug_set_look(0, -1.5); 1`);
@@ -158,6 +196,7 @@ async function main() {
   const afterPlace = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.creativePlaceNoConsume = creativeConsumed === 0 &&
     before.slots[0][1] === afterPlace.slots[0][1];
+  expect('yaratıcı modda koymak blok harcamaz', out.creativePlaceNoConsume);
 
   await evalJs(`window.__vcRs.debug_break(); 1`);
   await sleep(100);
@@ -180,9 +219,12 @@ async function main() {
   await evalJs(`window.__vcRs.debug_right_click(); 1`);
   const afterEat = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.eat = { before: appleBefore, after: afterEat.slots[8], hunger: afterEat.hunger };
+  expect('elma: açlık 6 → 12, bir elma eksilir',
+    afterEat.hunger === 12 && appleBefore?.[0] === 101 && afterEat.slots[8]?.[1] === appleBefore[1] - 1, out.eat);
 
   // ---- 11) Uçuş hayatta kalmada engelli ----
   out.flyBlocked = afterEat.flying === false;
+  expect('hayatta kalmada uçuş kapalı', out.flyBlocked);
 
   // ---- 12) FPS + çizim (yatay bakış) ----
   await evalJs(`window.__vcRs.debug_set_look(0.9, -0.05); 1`);
@@ -191,10 +233,32 @@ async function main() {
   out.perf = { fps: st.fps, chunks: st.chunks, draws: st.draws, tris: st.tris, pos: st.pos };
 
   // ---- 13) Uzak ışınlanma (sonsuz dünya akışı) ----
-  await evalJs(`window.__vcRs.debug_teleport(50000.5, 90, -50000.5); 1`);
-  await sleep(3500);
-  st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
-  out.farTeleport = { chunks: st.chunks, pos: st.pos, fps: st.fps };
+  // İkinci nokta, chunk uzaklığının karesi 32 biti taşacak kadar uzaktır:
+  // eski chunk'lar yine de boşaltılmalı (bellek sınırı korunmalı).
+  //
+  // Yaratıcı modda yapılır: hayatta kalma modunda y=90'a ışınlanan oyuncu
+  // düşüp ölür, yeniden doğuş da sonraki adımların (yüzme testi) ışınlamasını
+  // zamanlamaya bağlı olarak ezer.
+  const home = (await state()).pos;
+  await evalJs(`window.__vcRs.debug_set_mode(true); 1`);
+  out.farTeleport = [];
+  for (const [x, z] of [[50000.5, -50000.5], [1000000.5, -1000000.5]]) {
+    await evalJs(`window.__vcRs.debug_teleport(${x}, 90, ${z}); 1`);
+    await sleep(500);
+    st = await waitForStreaming();
+    const r = { chunks: st.chunks, gpuChunks: st.gpuChunks, wantMesh: st.wantMesh,
+      meshPending: st.meshPending, pos: st.pos, fps: st.fps };
+    out.farTeleport.push(r);
+    expect(`ışınlanma (${x}, ${z}): akış tamamlandı`, st.meshPending === 0, r);
+    expect(`ışınlanma (${x}, ${z}): eski chunk'lar boşaltıldı`,
+      st.chunks <= boot.chunks * 1.5 && st.gpuChunks <= st.chunks, r);
+  }
+  // Başlangıç noktasına, zemine geri dön ve hayatta kalmaya geç.
+  await evalJs(`window.__vcRs.debug_teleport(${home[0]}, ${home[1] + 0.05}, ${home[2]}); 1`);
+  await sleep(500);
+  await waitForStreaming();
+  await evalJs(`window.__vcRs.debug_set_mode(false); 1`);
+  await sleep(300);
 
   // ---- 14) Envanter ekranı ----
   await evalJs(`window.__vcRs.debug_set_open(true); 1`);
@@ -287,6 +351,11 @@ async function main() {
 
   out.problems = problems;
   console.log(JSON.stringify(out, null, 2));
+  if (problems.length > 0) {
+    console.log(`BAŞARISIZ: ${problems.length} sorun`);
+    process.exit(1);
+  }
+  console.log('BAŞARILI: tüm denetimler geçti');
   process.exit(0);
 }
 
