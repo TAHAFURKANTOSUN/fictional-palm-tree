@@ -76,7 +76,11 @@ const fn liquid_def(
     BlockDef { name, top, bottom, side, transparent: true, liquid: true, tint, vary: false }
 }
 
-static BLOCK_DEFS: [BlockDef; 14] = [
+const BLOCK_COUNT: usize = 14;
+
+static BLOCK_DEFS: [BlockDef; BLOCK_COUNT] = BLOCK_TABLE;
+
+const BLOCK_TABLE: [BlockDef; BLOCK_COUNT] = [
     def("Hava", T_GRASS_TOP, T_DIRT, T_GRASS_SIDE, true, [1.0, 1.0, 1.0], false),
     def("Çim Bloğu", T_GRASS_TOP, T_DIRT, T_GRASS_SIDE, false, [1.0, 1.0, 1.0], true),
     def("Toprak", T_DIRT, T_DIRT, T_DIRT, false, [1.0, 1.0, 1.0], false),
@@ -100,6 +104,27 @@ pub fn block_def(id: u8) -> &'static BlockDef {
     } else {
         &BLOCK_DEFS[0]
     }
+}
+
+/// `OPAQUE[id]`: blok komşu yüzleri tamamen gizliyor mu? Derleme zamanında
+/// `BLOCK_TABLE`'dan üretilir; tanımsız kimlikler (ve hava) opak değildir.
+static OPAQUE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut id = 1; // 0 = hava
+    while id < BLOCK_COUNT {
+        table[id] = !BLOCK_TABLE[id].transparent;
+        id += 1;
+    }
+    table
+};
+
+/// Komşusunun yüzünü tamamen gizleyen (opak) blok mu?
+///
+/// Mesh üretiminin en sıcak sorgusudur (yüz görünürlüğü + köşe başına üç
+/// ambient occlusion örneği), bu yüzden dallanmasız bir tablodan okunur.
+#[inline]
+pub fn is_opaque(id: u8) -> bool {
+    OPAQUE[id as usize]
 }
 
 /// Su ve hava dışındaki her blok katıdır (oyuncu çarpışması için).
@@ -168,6 +193,22 @@ mod tests {
         // yanlışlıkla katı mesh'e girer.
         assert!(block_def(WATER).liquid, "su sıvı olarak işaretlenmemiş");
         assert!(block_def(WATER).transparent);
+    }
+
+    #[test]
+    fn opacity_table_matches_the_block_definitions() {
+        assert!(!is_opaque(AIR), "hava opak olamaz");
+        for id in 1..=CRAFT_TABLE {
+            assert_eq!(
+                is_opaque(id),
+                !block_def(id).transparent,
+                "blok {id} için opaklık tablosu tanımla uyuşmuyor"
+            );
+        }
+        assert!(!is_opaque(WATER) && !is_opaque(GLASS));
+        assert!(is_opaque(LEAVES), "yaprak komşu yüzleri gizler");
+        // Tanımsız kimlikler hava gibi davranır.
+        assert!(!is_opaque(200));
     }
 
     #[test]

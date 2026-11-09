@@ -8,25 +8,30 @@ use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{Document, HtmlCanvasElement, HtmlElement, KeyboardEvent, MouseEvent, WheelEvent, Window};
+use web_sys::{
+    Document, HtmlCanvasElement, HtmlElement, KeyboardEvent, MouseEvent, Performance, WheelEvent,
+    Window,
+};
 
 use crate::blocks::{item_name, APPLE};
-use crate::crafting::{self, Grid};
+use crate::crafting::{self, FillError, Grid};
 use crate::gl::Renderer;
-use crate::hud::{DebugInfo, Hud};
+use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
-use crate::mesh;
+use crate::mesh::{self, MeshBuffers};
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
 use crate::survival::{Event, GameMode, Survival, TickInput};
-use crate::world::{ckey, World, CHUNK_SIZE};
+use crate::world::{ckey, stream_plan, World, CHUNK_SIZE, KEEP_MARGIN};
 
 const FOV_Y: f32 = 76.0_f32.to_radians();
 const MIN_RENDER_DIST: i32 = 3;
 const MAX_RENDER_DIST: i32 = 16;
-const KEEP_MARGIN: i32 = 2;
 const WORK_BUDGET_MS: f64 = 4.0;
 const SENSITIVITY: f64 = 0.0022;
+/// Ölçüm panelindeki sayıların (konum, çizim sayısı…) yenilenme aralığı.
+/// Her karede yenilenseydi arayüz de her karede yeniden çizilirdi.
+const DEBUG_SAMPLE_INTERVAL: f64 = 0.25;
 
 /// Yüzme (H6): suda yerçekimi yerine yumuşak batma, `Space` ile yukarı çıkış.
 const SWIM_SPEED: f64 = 2.6;
@@ -48,6 +53,9 @@ struct Game {
     hud: Hud,
     window: Window,
     document: Document,
+    perf: Option<Performance>,
+    /// Mesh üretiminin yeniden kullanılan tamponları (chunk başına ayırma yok).
+    mesh_buf: MeshBuffers,
 
     keys: HashMap<String, bool>,
     mouse: (f64, f64),
@@ -84,18 +92,19 @@ struct Game {
     fps_accum: f64,
     fps_frames: u32,
     fps: u32,
+    debug: DebugInfo,
+    debug_timer: f64,
     time: f32,
     started: bool,
 }
 
-fn now_ms() -> f64 {
-    web_sys::window()
-        .and_then(|w| w.performance())
-        .map(|p| p.now())
-        .unwrap_or(0.0)
-}
-
 impl Game {
+    /// Milisaniye cinsinden zaman. `Performance` nesnesi bir kez alınıp
+    /// saklanır: chunk akışı bunu bütçe denetimi için döngü içinde çağırır.
+    fn now_ms(&self) -> f64 {
+        self.perf.as_ref().map(|p| p.now()).unwrap_or(0.0)
+    }
+
     fn reach(&self) -> f64 {
         self.render_dist as f64 * CHUNK_SIZE as f64
     }
@@ -116,38 +125,38 @@ impl Game {
     // ---------------------------------------------------------------
 
     fn rebuild_want(&mut self, pcx: i32, pcz: i32) {
-        self.want_data.clear();
-        self.want_mesh.clear();
-        let r = self.render_dist;
-        let rd = r + 1;
-        for dz in -rd..=rd {
-            for dx in -rd..=rd {
-                let d2 = dx * dx + dz * dz;
-                if d2 > rd * rd {
-                    continue;
-                }
-                self.want_data.push((pcx + dx, pcz + dz, d2));
-                if d2 <= r * r {
-                    self.want_mesh.push((pcx + dx, pcz + dz, d2));
-                }
-            }
-        }
-        self.want_data.sort_by_key(|e| e.2);
-        self.want_mesh.sort_by_key(|e| e.2);
+        stream_plan(pcx, pcz, self.render_dist, &mut self.want_data, &mut self.want_mesh);
         self.data_idx = 0;
         self.mesh_idx = 0;
     }
 
+    /// Chunk'ın mesh'ini üretip GPU'ya yükler. Chunk'ın kendisi ya da 8
+    /// komşusundan biri yüklü değilse `false` döner.
+    fn mesh_chunk(&mut self, cx: i32, cz: i32) -> bool {
+        if !mesh::build_chunk_mesh_into(&self.world, cx, cz, &mut self.mesh_buf) {
+            return false;
+        }
+        let key = ckey(cx, cz);
+        if let Some(ch) = self.world.chunks.get_mut(&key) {
+            ch.meshed = true;
+        }
+        self.renderer.upload_chunk(key, cx, cz, &self.mesh_buf);
+        true
+    }
+
     fn cleanup_chunks(&mut self, pcx: i32, pcz: i32) {
-        let keep = self.render_dist + KEEP_MARGIN;
+        let keep = (self.render_dist + KEEP_MARGIN) as i64;
         let k2 = keep * keep;
         let doomed: Vec<u64> = self
             .world
             .chunks
             .values()
             .filter(|ch| {
-                let dx = ch.cx - pcx;
-                let dz = ch.cz - pcz;
+                // `i64`: çok uzağa ışınlanınca (≥ 46341 chunk) fark karesi
+                // `i32`'yi taşar, sarılan değer küçük çıkar ve eski
+                // chunk'lar hiç boşaltılmazdı.
+                let dx = ch.cx as i64 - pcx as i64;
+                let dz = ch.cz as i64 - pcz as i64;
                 dx * dx + dz * dz > k2
             })
             .map(|ch| ckey(ch.cx, ch.cz))
@@ -171,9 +180,9 @@ impl Game {
             self.cleanup_chunks(pcx, pcz);
         }
 
-        let t0 = now_ms();
+        let t0 = self.now_ms();
 
-        // 1) Veri üretimi (görüş + 1 halka)
+        // 1) Veri üretimi: mesh'lenecek chunk'lar ve onların tüm komşuları.
         let mut it = 0;
         while self.data_idx < self.want_data.len() {
             let (cx, cz, _) = self.want_data[self.data_idx];
@@ -182,36 +191,29 @@ impl Game {
                 self.world.generate_chunk(cx, cz);
             }
             it += 1;
-            if it & 7 == 0 && now_ms() - t0 > WORK_BUDGET_MS {
+            if it & 7 == 0 && self.now_ms() - t0 > WORK_BUDGET_MS {
                 return;
             }
         }
 
-        // 2) Mesh üretimi — 8 komşusu hazır olanlar
+        // 2) Mesh üretimi. Veri aşaması bittiği için her chunk'ın 8 komşusu
+        //    hazırdır; yine de biri eksikse o chunk atlanır (sıradakileri
+        //    bekletmez) ve bir sonraki akış yenilemesinde tekrar denenir.
         let mut it = 0;
         while self.mesh_idx < self.want_mesh.len() {
             let (cx, cz, _) = self.want_mesh[self.mesh_idx];
-            let key = ckey(cx, cz);
+            self.mesh_idx += 1;
             let needs_mesh = self
                 .world
                 .chunks
-                .get(&key)
+                .get(&ckey(cx, cz))
                 .map(|c| !c.meshed)
                 .unwrap_or(false);
             if needs_mesh {
-                if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, cx, cz) {
-                    if let Some(ch) = self.world.chunks.get_mut(&key) {
-                        ch.meshed = true;
-                        ch.faces = solid.face_count() + liquid.face_count();
-                    }
-                    self.renderer.upload_chunk(key, &solid, &liquid);
-                } else {
-                    return; // komşu eksik: sonraki karede tekrar dene
-                }
+                self.mesh_chunk(cx, cz);
             }
-            self.mesh_idx += 1;
             it += 1;
-            if it & 3 == 0 && now_ms() - t0 > WORK_BUDGET_MS {
+            if it & 3 == 0 && self.now_ms() - t0 > WORK_BUDGET_MS {
                 return;
             }
         }
@@ -219,24 +221,17 @@ impl Game {
 
     /// Başlatma sırasında tüm chunk'lar bitene kadar çalışır.
     fn boot_step(&mut self) -> bool {
-        let t0 = now_ms();
-        while self.data_idx < self.want_data.len() && now_ms() - t0 < 12.0 {
+        let t0 = self.now_ms();
+        while self.data_idx < self.want_data.len() && self.now_ms() - t0 < 12.0 {
             let (cx, cz, _) = self.want_data[self.data_idx];
             self.data_idx += 1;
             self.world.generate_chunk(cx, cz);
             self.boot_done += 1;
         }
-        while self.mesh_idx < self.want_mesh.len() && now_ms() - t0 < 12.0 {
+        while self.mesh_idx < self.want_mesh.len() && self.now_ms() - t0 < 12.0 {
             let (cx, cz, _) = self.want_mesh[self.mesh_idx];
-            let key = ckey(cx, cz);
-            if self.world.chunks.get(&key).map(|c| !c.meshed).unwrap_or(false) {
-                if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, cx, cz) {
-                    if let Some(ch) = self.world.chunks.get_mut(&key) {
-                        ch.meshed = true;
-                        ch.faces = solid.face_count() + liquid.face_count();
-                    }
-                    self.renderer.upload_chunk(key, &solid, &liquid);
-                }
+            if self.world.chunks.get(&ckey(cx, cz)).map(|c| !c.meshed).unwrap_or(false) {
+                self.mesh_chunk(cx, cz);
             }
             self.mesh_idx += 1;
             self.boot_done += 1;
@@ -393,13 +388,12 @@ impl Game {
         }
 
         for (tx, tz) in targets {
-            let key = ckey(tx, tz);
-            if let Some((solid, liquid)) = mesh::build_chunk_mesh(&self.world, tx, tz) {
-                if let Some(ch) = self.world.chunks.get_mut(&key) {
-                    ch.meshed = true;
-                    ch.faces = solid.face_count() + liquid.face_count();
+            if !self.mesh_chunk(tx, tz) {
+                // Komşusu henüz yüklenmemiş (ör. ışınlanmanın hemen ardından):
+                // eski mesh artık bayat, akış komşular gelince yeniden üretsin.
+                if let Some(ch) = self.world.chunks.get_mut(&ckey(tx, tz)) {
+                    ch.meshed = false;
                 }
-                self.renderer.upload_chunk(key, &solid, &liquid);
             }
         }
     }
@@ -457,14 +451,19 @@ impl Game {
     // ---------------------------------------------------------------
 
     fn frame(&mut self, now: f64) {
-        let dt = ((now - self.last_time) / 1000.0).clamp(0.0, 0.05);
+        // Simülasyon adımı 50 ms ile sınırlanır (takılmada oyuncu duvardan
+        // geçmesin); FPS sayacı ise gerçek kare süresini kullanır. Aksi hâlde
+        // 20 FPS'in altı hiç gösterilemezdi.
+        let frame_dt = ((now - self.last_time) / 1000.0).max(0.0);
+        let dt = frame_dt.min(0.05);
         self.last_time = now;
         self.time += dt as f32;
+        self.update_stats(frame_dt);
 
         if self.booting {
             self.boot_step();
             self.hud.tick(dt);
-            self.present(dt);
+            self.present();
             return;
         }
 
@@ -485,7 +484,36 @@ impl Game {
         self.update_survival(dt);
         self.drain_events();
         self.hud.tick(dt);
-        self.present(dt);
+        self.present();
+    }
+
+    /// FPS sayacını ve ölçüm panelinin örneklenen sayılarını günceller.
+    fn update_stats(&mut self, frame_dt: f64) {
+        // Sekme arka plandayken kare gelmez; dönüşteki tek dev "kare" FPS'e
+        // katılmaz (yoksa sayaç bir an 0 gösterir).
+        if frame_dt < 1.0 {
+            self.fps_accum += frame_dt;
+            self.fps_frames += 1;
+        }
+        if self.fps_accum >= 0.4 {
+            self.fps = (self.fps_frames as f64 / self.fps_accum).round() as u32;
+            self.fps_accum = 0.0;
+            self.fps_frames = 0;
+        }
+
+        self.debug_timer += frame_dt;
+        if self.debug_timer >= DEBUG_SAMPLE_INTERVAL {
+            self.debug_timer = 0.0;
+            let p = self.player.pos;
+            self.debug = DebugInfo {
+                fps: self.fps,
+                pos: [p[0].round() as i32, p[1].round() as i32, p[2].round() as i32],
+                chunks: self.world.chunks.len(),
+                draws: self.renderer.stats_draws,
+                tris: self.renderer.stats_tris,
+                render_dist: self.render_dist,
+            };
+        }
     }
 
     fn update_player(&mut self, dt: f64) {
@@ -585,7 +613,10 @@ impl Game {
 
         self.player.on_ground = false;
         let v = self.player.vel;
+        let before = self.player.pos;
         self.player.move_with_collision(&self.world, v[0] * dt, v[1] * dt, v[2] * dt);
+        // Gerçekten kat edilen yatay yol: duvara yürümek yorgunluk üretmez.
+        self.moved_dist = (self.player.pos[0] - before[0]).hypot(self.player.pos[2] - before[2]);
 
         // Sıkışıp kalırsak yukarı doğru kurtar.
         let mut guard = 0;
@@ -601,7 +632,6 @@ impl Game {
             self.survival.damage(2, "boşluk");
         }
 
-        self.moved_dist = (v[0] * dt).hypot(v[2] * dt);
         self.sprinting = sprinting;
     }
 
@@ -622,14 +652,16 @@ impl Game {
         self.survival.tick(&input);
     }
 
-    fn present(&mut self, _dt: f64) {
+    fn present(&mut self) {
         let (w, h) = (self.hud.width, self.hud.height);
         let aspect = if h > 0.0 { (w / h) as f32 } else { 1.0 };
         let reach = self.reach() as f32;
+        // Kamera konumu `f64` olarak verilir; çizici chunk ofsetlerini bu
+        // hassasiyetle hesaplar.
         let cam = [
-            self.player.pos[0] as f32,
-            (self.player.pos[1] + self.player.eye_height) as f32,
-            self.player.pos[2] as f32,
+            self.player.pos[0],
+            self.player.pos[1] + self.player.eye_height,
+            self.player.pos[2],
         ];
 
         self.renderer.render(
@@ -644,40 +676,17 @@ impl Game {
             self.time,
         );
 
-        self.fps_accum += _dt;
-        self.fps_frames += 1;
-        if self.fps_accum >= 0.4 {
-            self.fps = (self.fps_frames as f64 / self.fps_accum).round() as u32;
-            self.fps_accum = 0.0;
-            self.fps_frames = 0;
-        }
-
-        let hand = match self.inv.selected_stack() {
-            Some(s) => format!("{} ×{}", item_name(s.id), s.count),
-            None => "Boş".to_string(),
-        };
-
-        let debug = DebugInfo {
-            fps: self.fps,
-            pos: self.player.pos,
-            chunks: self.world.chunks.len(),
-            draws: self.renderer.stats_draws,
-            tris: self.renderer.stats_tris,
-            render_dist: self.render_dist,
-            mode_label: self.survival.mode.label().to_string(),
-            fly_label: if self.player.flying { "Uçuş" } else { "Yürüyüş" }.to_string(),
-            hand,
-        };
-
-        let inv_open = self.inv_open;
-        let inv = &self.inv;
-        let grid = &self.grid;
-        let survival = &self.survival;
-        let held = self.held;
-        let mouse = self.mouse;
-        let hud_visible = self.hud_visible;
-        self.hud
-            .draw(inv_open, inv, grid, survival, held, mouse, hud_visible, Some(debug));
+        self.hud.draw(&HudFrame {
+            inv_open: self.inv_open,
+            hud_visible: self.hud_visible,
+            inv: &self.inv,
+            grid: &self.grid,
+            survival: &self.survival,
+            flying: self.player.flying,
+            held: self.held,
+            mouse: self.mouse,
+            debug: self.debug,
+        });
     }
 
     // ---------------------------------------------------------------
@@ -686,6 +695,14 @@ impl Game {
 
     fn on_key_down(&mut self, e: &KeyboardEvent) {
         let code = e.code();
+
+        // Koşma tuşu Ctrl olduğu için oyun tuşları tarayıcı kısayollarına
+        // dönüşür: Ctrl+S "sayfayı kaydet", Ctrl+D yer imi, Ctrl+F sayfada
+        // bul, Ctrl+= yakınlaştırma… Oyun sürerken bunlar engellenir.
+        // (Ctrl+W tarayıcıya ayrılmıştır; sayfa onu engelleyemez.)
+        if e.ctrl_key() && self.started && is_game_key(&code) {
+            e.prevent_default();
+        }
 
         if code == "KeyE" && !e.repeat() {
             e.prevent_default();
@@ -715,7 +732,7 @@ impl Game {
 
         if code == "Space" {
             e.prevent_default();
-            let now = now_ms();
+            let now = self.now_ms();
             if now - self.last_space_tap < 280.0 {
                 self.toggle_fly(None, false);
             }
@@ -857,22 +874,22 @@ impl Game {
             "clear" => crafting::clear_grid(&mut self.grid, &mut self.inv),
             "recipe" => {
                 if let Some(rec) = crafting::RECIPES.get(index) {
-                    if let Err(missing) = crafting::auto_fill(&mut self.grid, &mut self.inv, rec) {
-                        let msg = format!("Yetersiz malzeme: {}", item_name(missing));
-                        self.hud.toast(msg);
+                    match crafting::auto_fill(&mut self.grid, &mut self.inv, rec) {
+                        Ok(()) => {}
+                        Err(FillError::Missing(id)) => {
+                            let msg = format!("Yetersiz malzeme: {}", item_name(id));
+                            self.hud.toast(msg);
+                        }
+                        Err(FillError::GridNotEmpty) => {
+                            self.hud.toast("Envanter dolu — tezgah boşaltılamadı");
+                        }
                     }
                 }
             }
             "result" => {
-                if let Some((id, n)) = crafting::take_result(&mut self.grid) {
-                    match self.held {
-                        Some(ref mut h) if h.id == id && h.count as u32 + n as u32 <= MAX_STACK as u32 => {
-                            h.count += n;
-                        }
-                        None => self.held = Some(Stack::new(id, n)),
-                        _ => {}
-                    }
-                }
+                // Sığmıyorsa (elde başka eşya var ya da yığın dolacak) hiçbir
+                // şey tüketilmez.
+                crafting::take_result_into(&mut self.grid, &mut self.held);
             }
             _ => {
                 let target: Option<&mut Option<Stack>> = match kind {
@@ -887,6 +904,16 @@ impl Game {
             }
         }
     }
+}
+
+/// Oyunun kullandığı bir tuş mu? (`KeyboardEvent.code` değeri)
+fn is_game_key(code: &str) -> bool {
+    matches!(
+        code,
+        "KeyW" | "KeyA" | "KeyS" | "KeyD" | "KeyE" | "KeyF" | "KeyG" | "KeyH" | "Space"
+            | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
+            | "BracketLeft" | "BracketRight" | "Equal" | "Minus"
+    ) || code.starts_with("Digit")
 }
 
 /// Sürükle-bırak kuralı: sol tık tümünü alır/bırakır, sağ tık yarım alır / tek bırakır.
@@ -989,7 +1016,8 @@ pub fn debug_state_json() -> String {
                 "{{",
                 "\"health\":{},\"hunger\":{},\"air\":{:.1},",
                 "\"mode\":\"{}\",\"dead\":{},\"booting\":{},\"started\":{},",
-                "\"chunks\":{},\"fps\":{},\"draws\":{},\"tris\":{},",
+                "\"chunks\":{},\"gpuChunks\":{},\"wantMesh\":{},\"meshPending\":{},",
+                "\"fps\":{},\"draws\":{},\"tris\":{},",
                 "\"selected\":{},\"held\":{},",
                 "\"pos\":[{:.2},{:.2},{:.2}],\"yaw\":{:.3},\"pitch\":{:.3},",
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
@@ -1005,6 +1033,14 @@ pub fn debug_state_json() -> String {
             g.booting,
             g.started,
             g.world.chunks.len(),
+            g.renderer.chunk_count(),
+            g.want_mesh.len(),
+            // Görüş mesafesinde olup henüz mesh'lenmemiş chunk sayısı; akış
+            // bittiğinde 0 olmalıdır.
+            g.want_mesh
+                .iter()
+                .filter(|(cx, cz, _)| !g.world.chunks.get(&ckey(*cx, *cz)).is_some_and(|c| c.meshed))
+                .count(),
             g.fps,
             g.renderer.stats_draws,
             g.renderer.stats_tris,
@@ -1214,6 +1250,7 @@ fn resize_canvases(game: &mut Game) {
 pub fn start() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or("pencere yok")?;
     let document = window.document().ok_or("doküman yok")?;
+    let perf = window.performance();
 
     let gl_canvas = document
         .get_element_by_id("gl")
@@ -1258,6 +1295,9 @@ pub fn start() -> Result<(), JsValue> {
         hud,
         window: window.clone(),
         document: document.clone(),
+        last_time: perf.as_ref().map(|p| p.now()).unwrap_or(0.0),
+        perf,
+        mesh_buf: MeshBuffers::default(),
         keys: HashMap::new(),
         mouse: (0.0, 0.0),
         pointer_locked: false,
@@ -1282,10 +1322,12 @@ pub fn start() -> Result<(), JsValue> {
         boot_total: 0,
         boot_done: 0,
         death_timer: 0.0,
-        last_time: now_ms(),
         fps_accum: 0.0,
         fps_frames: 0,
         fps: 0,
+        debug: DebugInfo::default(),
+        // İlk karede hemen örneklensin.
+        debug_timer: DEBUG_SAMPLE_INTERVAL,
         time: 0.0,
         started: false,
         moved_dist: 0.0,
@@ -1358,6 +1400,21 @@ pub fn start() -> Result<(), JsValue> {
         cb.forget();
     }
     {
+        // Pencere odağı kaybedince (Alt+Tab, başka sekme) basılı tuşların
+        // `keyup` olayı hiç gelmez; tuşlar temizlenmezse oyuncu geri
+        // dönüldüğünde kendi kendine yürümeye devam eder.
+        let g = game.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.keys.clear();
+                game.dragging = false;
+                game.drag_button = -1;
+            }
+        });
+        window.add_event_listener_with_callback("blur", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+    {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
             let locked = g
@@ -1393,7 +1450,7 @@ pub fn start() -> Result<(), JsValue> {
             drop(g2);
             let mut game = g.borrow_mut();
             game.started = true;
-            game.last_time = now_ms();
+            game.last_time = game.now_ms();
             if let Some(el) = game.document.get_element_by_id("overlay") {
                 let _ = el.class_list().add_1("hide");
             }

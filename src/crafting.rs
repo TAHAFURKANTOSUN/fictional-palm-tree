@@ -4,7 +4,7 @@
 //! konursa konsun, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
 
 use crate::blocks::{CRAFT_TABLE, DIRT, GRASS, LEAVES, LOG, PLANKS, SAND, STICK, STONE};
-use crate::inventory::{Inventory, Stack};
+use crate::inventory::{Inventory, Stack, MAX_STACK};
 
 pub type Grid = [Option<Stack>; 9];
 
@@ -204,14 +204,29 @@ pub fn clear_grid(grid: &mut Grid, inv: &mut Inventory) {
     }
 }
 
+/// [`auto_fill`]'in başarısız olma nedeni.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FillError {
+    /// Envanterde bu eşyadan yeterince yok.
+    Missing(u16),
+    /// Izgaradaki eski malzemeler envantere sığmadı; ızgara boşaltılamadı.
+    GridNotEmpty,
+}
+
 /// Tarifi envanterden ızgaraya otomatik yerleştirir.
-/// Yetersiz malzemede `Err(eksik eşya kimliği)` döner.
-pub fn auto_fill(grid: &mut Grid, inv: &mut Inventory, rec: &Recipe) -> Result<(), u16> {
+///
+/// Önce ızgaradaki malzemeler envantere geri konur. Envanter doluysa ve
+/// ızgara tamamen boşalmazsa hiçbir şey yerleştirilmez: aksi hâlde desen,
+/// yerinde kalan yığınların üzerine yazılır ve o eşyalar yok olurdu.
+pub fn auto_fill(grid: &mut Grid, inv: &mut Inventory, rec: &Recipe) -> Result<(), FillError> {
     clear_grid(grid, inv);
+    if grid.iter().any(|s| s.is_some()) {
+        return Err(FillError::GridNotEmpty);
+    }
 
     for (id, n) in recipe_needs(rec) {
         if inv.count(id) < n {
-            return Err(id);
+            return Err(FillError::Missing(id));
         }
     }
 
@@ -257,10 +272,35 @@ pub fn take_result(grid: &mut Grid) -> Option<(u16, u8)> {
     Some(out)
 }
 
+/// Sonuç yuvasına tıklama: bir üretimi fareyle taşınan `held` yığınına ekler.
+///
+/// Elde başka bir eşya varsa ya da yığın [`MAX_STACK`]'i aşacaksa **hiçbir şey
+/// tüketilmez** ve `false` döner. (Önce malzemeyi tüketip sonra sığıp
+/// sığmadığına bakmak, sığmayan üretimi ve malzemelerini yok ederdi.)
+pub fn take_result_into(grid: &mut Grid, held: &mut Option<Stack>) -> bool {
+    let Some((id, n)) = craft_output(grid) else {
+        return false;
+    };
+    let fits = match held {
+        None => true,
+        Some(h) => h.id == id && h.count as u32 + n as u32 <= MAX_STACK as u32,
+    };
+    if !fits {
+        return false;
+    }
+    take_result(grid);
+    match held {
+        Some(h) => h.count += n,
+        None => *held = Some(Stack::new(id, n)),
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::blocks::{AIR, BRICK, GLASS};
+    use crate::inventory::INV_SIZE;
 
     fn empty() -> Grid {
         [None; 9]
@@ -369,7 +409,72 @@ mod tests {
         let mut inv = Inventory::new();
         let mut g = empty();
         // Tezgah için 4 tahta gerekir, envanter boş.
-        assert_eq!(auto_fill(&mut g, &mut inv, &RECIPES[2]), Err(PLANKS as u16));
+        assert_eq!(
+            auto_fill(&mut g, &mut inv, &RECIPES[2]),
+            Err(FillError::Missing(PLANKS as u16))
+        );
+    }
+
+    /// Regresyon: envanter doluyken ızgarada kalan yığınların üzerine tarif
+    /// deseni yazılıyor, o eşyalar yok oluyordu.
+    #[test]
+    fn auto_fill_never_overwrites_stacks_that_could_not_be_returned() {
+        let mut inv = Inventory::new();
+        for slot in inv.slots.iter_mut() {
+            *slot = Some(Stack::new(PLANKS as u16, MAX_STACK));
+        }
+        let mut g = empty();
+        g[0] = Some(Stack::new(STONE as u16, 30)); // envantere sığmaz
+        let total_before = INV_SIZE as u32 * MAX_STACK as u32;
+
+        // "table" tarifi (2×2 tahta) tam da ızgaranın 0. hücresine yazardı.
+        assert_eq!(auto_fill(&mut g, &mut inv, &RECIPES[2]), Err(FillError::GridNotEmpty));
+        assert_eq!(g[0], Some(Stack::new(STONE as u16, 30)), "ızgaradaki yığın yok oldu");
+        assert_eq!(inv.count(PLANKS as u16), total_before, "başarısız doldurma malzeme harcadı");
+    }
+
+    #[test]
+    fn taking_the_result_stacks_onto_the_held_item() {
+        let mut g = empty();
+        put(&mut g, 4, LOG as u16);
+        let mut held = None;
+        assert!(take_result_into(&mut g, &mut held));
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, 4)));
+        assert!(g.iter().all(|s| s.is_none()));
+
+        // Aynı eşyadan elde varken üstüne eklenir.
+        put(&mut g, 0, LOG as u16);
+        assert!(take_result_into(&mut g, &mut held));
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, 8)));
+
+        // Boş ızgara: değişiklik yok.
+        assert!(!take_result_into(&mut g, &mut held));
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, 8)));
+    }
+
+    /// Regresyon: elde başka bir eşya (ya da dolmak üzere bir yığın) varken
+    /// sonuca tıklamak malzemeleri tüketip üretimi çöpe atıyordu.
+    #[test]
+    fn taking_a_result_that_does_not_fit_consumes_nothing() {
+        // Elde farklı bir eşya.
+        let mut g = empty();
+        put(&mut g, 4, LOG as u16);
+        let mut held = Some(Stack::new(STONE as u16, 5));
+        assert!(!take_result_into(&mut g, &mut held));
+        assert_eq!(g[4], Some(Stack::new(LOG as u16, 1)), "malzeme boşa harcandı");
+        assert_eq!(held, Some(Stack::new(STONE as u16, 5)));
+
+        // Aynı eşya ama yığın taşacak: 62 + 4 > 64.
+        let mut held = Some(Stack::new(PLANKS as u16, 62));
+        assert!(!take_result_into(&mut g, &mut held));
+        assert_eq!(g[4], Some(Stack::new(LOG as u16, 1)), "malzeme boşa harcandı");
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, 62)));
+
+        // Tam sığıyorsa alınır: 60 + 4 = 64.
+        let mut held = Some(Stack::new(PLANKS as u16, 60));
+        assert!(take_result_into(&mut g, &mut held));
+        assert_eq!(held, Some(Stack::new(PLANKS as u16, MAX_STACK)));
+        assert!(g[4].is_none());
     }
 
     #[test]

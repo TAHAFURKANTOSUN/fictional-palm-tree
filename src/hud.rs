@@ -2,8 +2,14 @@
 //!
 //! Tüm arayüz (nişangah, kısayol çubuğu, can/açlık/nefes göstergeleri,
 //! bildirimler, envanter + çalışma tezgahı ekranı) WebGL tuvalinin üstündeki
-//! ikinci bir tuval üzerine çizilir. Yerleşim her karede hesaplanır ve aynı
-//! dikdörtgenler hem çizim hem de fare isabet testi için kullanılır.
+//! ikinci bir tuval üzerine çizilir. Aynı dikdörtgenler hem çizim hem de fare
+//! isabet testi için kullanılır.
+//!
+//! Arayüz **yalnızca görüntüsü değiştiğinde** yeniden çizilir. Tam bir çizim
+//! binlerce Canvas2D çağrısıdır (yalnızca kalpler ve butlar ~2000 `fillRect`)
+//! ve bunu her karede yapmak, karenin betik süresinin büyük kısmını
+//! oluşturuyordu. [`Hud::draw`] bu yüzden önce görüntüyü belirleyen durumun
+//! bir özetini ([`HudKey`]) çıkarır; son çizilenle aynıysa tuvale dokunmaz.
 
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
@@ -11,8 +17,12 @@ use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 use crate::atlas::{ATLAS_H, ATLAS_W, TILE};
 use crate::blocks::*;
 use crate::crafting::{self, Grid};
-use crate::inventory::{Inventory, Stack, HOTBAR_SIZE};
+use crate::inventory::{Inventory, Slots, Stack, HOTBAR_SIZE};
 use crate::survival::{Survival, MAX_AIR};
+
+/// Solma ve hasar parlaması gibi sürekli değişen opaklıkların kaç kademede
+/// yeniden çizileceği. Kademeler arası fark gözle seçilemez.
+const ALPHA_STEPS: f64 = 64.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
@@ -46,13 +56,73 @@ pub struct Layout {
     pub label_row: f64,
 }
 
+/// HUD'un bir karede göstermesi istenen her şey.
+pub struct HudFrame<'a> {
+    pub inv_open: bool,
+    pub hud_visible: bool,
+    pub inv: &'a Inventory,
+    pub grid: &'a Grid,
+    pub survival: &'a Survival,
+    pub flying: bool,
+    /// Envanter ekranında fareyle taşınan yığın.
+    pub held: Option<Stack>,
+    pub mouse: (f64, f64),
+    pub debug: DebugInfo,
+}
+
+/// Sol üstteki ölçüm panelinin sayıları. Uygulama bunları her karede değil,
+/// saniyede birkaç kez örnekler; aksi hâlde yalnızca kamera döndüğü için
+/// (çizim/üçgen sayısı değiştiğinden) arayüz her karede yeniden çizilirdi.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct DebugInfo {
+    pub fps: u32,
+    /// En yakın bloğa yuvarlanmış oyuncu konumu.
+    pub pos: [i32; 3],
+    pub chunks: usize,
+    pub draws: u32,
+    pub tris: u32,
+    pub render_dist: i32,
+}
+
+/// Çizilen görüntüyü belirleyen durumun özeti: iki özet eşitse iki çizim de
+/// piksel piksel aynıdır (opaklıklar [`ALPHA_STEPS`] kademesine yuvarlanır).
+/// Görüntüyü etkileyen yeni bir girdi eklendiğinde buraya da eklenmelidir.
+#[derive(PartialEq)]
+struct HudKey {
+    inv_open: bool,
+    hud_visible: bool,
+    slots: Slots,
+    selected: usize,
+    grid: Grid,
+    held: Option<Stack>,
+    /// Yalnızca bir yığın taşınırken anlamlıdır (ikon fareyi izler).
+    cursor: (i32, i32),
+    creative: bool,
+    flying: bool,
+    dead: bool,
+    health: i32,
+    hunger: i32,
+    /// (gösterge görünür mü, dolu/yarım baloncuk sayısı, sonuncusu tam mı)
+    air: (bool, i32, bool),
+    hurt: u8,
+    /// (bildirim sıra numarası, opaklık kademesi)
+    toast: Option<(u32, u8)>,
+    /// Yalnızca ölçüm paneli görünürken anlamlıdır.
+    debug: DebugInfo,
+}
+
 pub struct Hud {
     ctx: CanvasRenderingContext2d,
     atlas: HtmlCanvasElement,
     pub width: f64,
     pub height: f64,
     toast: Option<(String, f64)>,
+    /// Her yeni bildirimde artar; aynı metin yeniden gösterilse bile
+    /// özet değişsin diye.
+    toast_seq: u32,
     pub layout: Option<Layout>,
+    /// Tuvalde şu an duran görüntünün özeti; `None` ise tuval geçersizdir.
+    drawn: Option<HudKey>,
 }
 
 /// Piksel sanatı ikonlar (9×8). `1` ana renk, `2` koyu kenar.
@@ -110,17 +180,59 @@ impl Hud {
             width: 1.0,
             height: 1.0,
             toast: None,
+            toast_seq: 0,
             layout: None,
+            drawn: None,
         })
     }
 
+    /// Tuval boyutu değişti. Boyut ataması tuvali temizlediği için (aynı
+    /// boyut atansa bile) bir sonraki `draw` mutlaka yeniden çizer.
     pub fn resize(&mut self, w: f64, h: f64) {
         self.width = w;
         self.height = h;
+        self.layout = Some(self.compute_layout());
+        self.drawn = None;
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
         self.toast = Some((text.into(), 1.6));
+        self.toast_seq = self.toast_seq.wrapping_add(1);
+    }
+
+    /// Bildirimin o anki opaklığı (son 0,4 saniyede söner).
+    fn toast_alpha(life: f64) -> f64 {
+        (life / 0.4).min(1.0)
+    }
+
+    fn key_for(&self, f: &HudFrame) -> HudKey {
+        let s = f.survival;
+        let bubbles = s.air / (MAX_AIR / 10.0);
+        let show_debug = f.hud_visible && !f.inv_open;
+        HudKey {
+            inv_open: f.inv_open,
+            hud_visible: f.hud_visible,
+            slots: f.inv.slots,
+            selected: f.inv.selected,
+            grid: *f.grid,
+            held: f.held,
+            cursor: match f.held {
+                Some(_) => (f.mouse.0 as i32, f.mouse.1 as i32),
+                None => (0, 0),
+            },
+            creative: s.is_creative(),
+            flying: f.flying,
+            dead: s.dead,
+            health: s.health,
+            hunger: s.hunger,
+            air: (s.air < MAX_AIR - 0.01, bubbles.ceil() as i32, bubbles.fract() == 0.0),
+            hurt: (s.hurt_flash * ALPHA_STEPS).ceil() as u8,
+            toast: self
+                .toast
+                .as_ref()
+                .map(|(_, life)| (self.toast_seq, (Self::toast_alpha(*life) * ALPHA_STEPS).ceil() as u8)),
+            debug: if show_debug { f.debug } else { DebugInfo::default() },
+        }
     }
 
     pub fn tick(&mut self, dt: f64) {
@@ -142,7 +254,7 @@ impl Hud {
     // Yerleşim
     // ---------------------------------------------------------------
 
-    pub fn compute_layout(&self, inv_open: bool) -> Layout {
+    pub fn compute_layout(&self) -> Layout {
         let (w, h) = (self.width, self.height);
         let gap = 5.0;
         let slot = 52.0;
@@ -252,7 +364,6 @@ impl Hud {
         let close_btn = Rect { x: px + panel_w - pad - 108.0, y: btn_y, w: 108.0, h: 30.0 };
         let clear_btn = Rect { x: close_btn.x - 12.0 - 130.0, y: btn_y, w: 130.0, h: 30.0 };
 
-        let _ = inv_open;
         Layout {
             hotbar,
             craft,
@@ -498,7 +609,7 @@ impl Hud {
 
     fn draw_toast(&self) {
         let Some((text, life)) = self.toast.as_ref() else { return };
-        let alpha = (life / 0.4).min(1.0);
+        let alpha = Self::toast_alpha(*life);
         let ctx = &self.ctx;
         let w = text.chars().count() as f64 * 8.0 + 34.0;
         let h = 30.0;
@@ -515,33 +626,22 @@ impl Hud {
         ctx.set_global_alpha(1.0);
     }
 
-    /// Sağ üstteki ölçüm paneli.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_debug(
-        &self,
-        fps: u32,
-        pos: [f64; 3],
-        chunks: usize,
-        draws: u32,
-        tris: u32,
-        render_dist: i32,
-        mode_label: &str,
-        fly_label: &str,
-        hand: &str,
-    ) {
+    /// Sol üstteki ölçüm paneli.
+    fn draw_debug(&self, d: &DebugInfo, f: &HudFrame) {
         let ctx = &self.ctx;
+        let hand = match f.inv.selected_stack() {
+            Some(s) => format!("{} ×{}", item_name(s.id), s.count),
+            None => "Boş".to_string(),
+        };
         let lines = [
-            ("FPS", fps.to_string()),
-            (
-                "Konum",
-                format!("{:.0}, {:.0}, {:.0}", pos[0], pos[1], pos[2]),
-            ),
-            ("Bölge", format!("{chunks} yüklü")),
-            ("Mesafe", format!("{render_dist} bölge")),
-            ("Çizim", format!("{draws} · {:.0}k üçgen", tris as f64 / 1000.0)),
-            ("Mod", fly_label.to_string()),
-            ("Oyun", mode_label.to_string()),
-            ("El", hand.to_string()),
+            ("FPS", d.fps.to_string()),
+            ("Konum", format!("{}, {}, {}", d.pos[0], d.pos[1], d.pos[2])),
+            ("Bölge", format!("{} yüklü", d.chunks)),
+            ("Mesafe", format!("{} bölge", d.render_dist)),
+            ("Çizim", format!("{} · {:.0}k üçgen", d.draws, d.tris as f64 / 1000.0)),
+            ("Mod", if f.flying { "Uçuş" } else { "Yürüyüş" }.to_string()),
+            ("Oyun", f.survival.mode.label().to_string()),
+            ("El", hand),
         ];
         let x = 12.0;
         let mut y = 16.0;
@@ -558,21 +658,19 @@ impl Hud {
     // Ana çizim
     // ---------------------------------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(
-        &mut self,
-        inv_open: bool,
-        inv: &Inventory,
-        grid: &Grid,
-        survival: &Survival,
-        held: Option<Stack>,
-        mouse: (f64, f64),
-        hud_visible: bool,
-        debug: Option<DebugInfo>,
-    ) {
+    /// Arayüzü günceller. Görüntüyü belirleyen durum son çizimden beri
+    /// değişmediyse hiçbir şey yapmaz; tuvaldeki görüntü zaten doğrudur.
+    pub fn draw(&mut self, f: &HudFrame) {
+        let key = self.key_for(f);
+        if self.drawn.as_ref() == Some(&key) {
+            return;
+        }
+        self.drawn = Some(key);
+
+        let (inv, survival) = (f.inv, f.survival);
         let ctx = &self.ctx;
         ctx.clear_rect(0.0, 0.0, self.width, self.height);
-        let l = self.compute_layout(inv_open);
+        let l = self.compute_layout();
 
         // Hasar aldığında kırmızı vinyet.
         if survival.hurt_flash > 0.001 {
@@ -595,21 +693,16 @@ impl Hud {
             }
         }
 
-        if inv_open {
-            self.draw_inventory(inv, grid, held, mouse, &l);
+        if f.inv_open {
+            self.draw_inventory(inv, f.grid, &l);
         } else {
-            if hud_visible {
+            if f.hud_visible {
                 self.draw_crosshair();
                 for (i, r) in l.hotbar.iter().enumerate() {
                     self.slot(*r, inv.slots[i], i == inv.selected, Some(i));
                 }
                 self.draw_vitals(survival, &l);
-                if let Some(d) = &debug {
-                    self.draw_debug(
-                        d.fps, d.pos, d.chunks, d.draws, d.tris, d.render_dist,
-                        &d.mode_label, &d.fly_label, &d.hand,
-                    );
-                }
+                self.draw_debug(&f.debug, f);
             }
             self.draw_toast();
         }
@@ -628,7 +721,8 @@ impl Hud {
         }
 
         // Fareyle taşınan yığın
-        if let Some(s) = held {
+        if let Some(s) = f.held {
+            let mouse = f.mouse;
             self.draw_icon(s.id, mouse.0 - 20.0, mouse.1 - 20.0, 40.0);
             if s.count > 1 {
                 self.label(
@@ -645,14 +739,7 @@ impl Hud {
         self.layout = Some(l);
     }
 
-    fn draw_inventory(
-        &self,
-        inv: &Inventory,
-        grid: &Grid,
-        held: Option<Stack>,
-        mouse: (f64, f64),
-        l: &Layout,
-    ) {
+    fn draw_inventory(&self, inv: &Inventory, grid: &Grid, l: &Layout) {
         let ctx = &self.ctx;
         ctx.set_fill_style_str("rgba(6,8,12,0.58)");
         ctx.fill_rect(0.0, 0.0, self.width, self.height);
@@ -772,8 +859,6 @@ impl Hud {
 
         self.button(l.clear_btn, "Tezgahı boşalt", false);
         self.button(l.close_btn, "Kapat (E)", true);
-
-        let _ = (held, mouse);
     }
 
     // ---------------------------------------------------------------
@@ -823,17 +908,4 @@ impl Hud {
             None
         }
     }
-}
-
-/// HUD'a aktarılan ölçüm bilgileri.
-pub struct DebugInfo {
-    pub fps: u32,
-    pub pos: [f64; 3],
-    pub chunks: usize,
-    pub draws: u32,
-    pub tris: u32,
-    pub render_dist: i32,
-    pub mode_label: String,
-    pub fly_label: String,
-    pub hand: String,
 }

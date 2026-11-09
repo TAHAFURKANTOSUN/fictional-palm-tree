@@ -15,11 +15,17 @@ pub const CHUNK_AREA: usize = 256; // CHUNK_SIZE^2
 pub const WORLD_HEIGHT: i32 = 64;
 pub const SEA_LEVEL: i32 = 26;
 
-/// Chunk anahtarı. Negatif koordinatlar da 18 bitlik alana sarılır; böylece
-/// string ayırma olmadan `u64` anahtar üretilir (GC/ayırma baskısı yok).
+/// Yüklü tutulan alan, görüş mesafesinden bu kadar chunk geniştir; böylece
+/// oyuncu bir chunk sınırında ileri geri gittiğinde aynı chunk'lar tekrar tekrar
+/// üretilmez. `stream_plan`'ın veri kümesi her zaman bu sınırın içinde kalır.
+pub const KEEP_MARGIN: i32 = 2;
+
+/// Chunk anahtarı: iki `i32` koordinat tek bir `u64`'e paketlenir (üst 32 bit
+/// `cx`, alt 32 bit `cz`). Tüm `i32` aralığında birebirdir — hiçbir chunk
+/// çifti aynı anahtara düşmez.
 #[inline]
 pub fn ckey(cx: i32, cz: i32) -> u64 {
-    ((cx as u64 & 0x3_FFFF) * 0x4_0000) + (cz as u64 & 0x3_FFFF)
+    ((cx as u32 as u64) << 32) | (cz as u32 as u64)
 }
 
 /// Chunk içi yerel indeks: `x + 16*(z + 16*y)`.
@@ -40,7 +46,15 @@ pub struct Chunk {
     /// blok üstüne çıkar, bu yüzden ağaç tepeleri eskiden mesh dışında kalıp
     /// görünmez oluyordu (bloklar katı kalıyordu).
     pub content_top: i32,
-    pub faces: u32,
+    /// Bu chunk'ta **opak olmayan** (hava, su, cam) bir hücrenin bulunduğu en
+    /// düşük `y`. Bunun bir altındaki katmandan daha aşağıda hiçbir yüz
+    /// görünemez; mesh'in alt sınırı buradan gelir.
+    ///
+    /// Arazi yüksekliğinden türetilmez, çünkü oyuncu kazarak yüzeyin altında
+    /// boşluk açabilir. Blok kaldırıldıkça düşer, doldurulunca yükselmez
+    /// (fazladan taranan katman zararsızdır, eksik taranan katman görünmez
+    /// duvar demektir).
+    pub min_open: i32,
 }
 
 pub struct World {
@@ -103,6 +117,9 @@ impl World {
             if y > ch.content_top {
                 ch.content_top = y;
             }
+            if y < ch.min_open && !is_opaque(v) {
+                ch.min_open = y;
+            }
         }
 
         self.edits.entry(key).or_default().insert(idx, v);
@@ -119,6 +136,8 @@ impl World {
         // Chunk'taki gerçek en yüksek dolu blok — mesh'in y aralığı buna göre
         // daraltılır. Ağaç yaprakları da dâhil edilmezse tepeleri görünmez olur.
         let mut content_top = 0;
+        // En alçak sütun: onun hemen üstü (hava ya da su) ilk açık hücredir.
+        let mut min_h = WORLD_HEIGHT;
 
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
@@ -147,6 +166,7 @@ impl World {
                     }
                 }
 
+                min_h = min_h.min(h);
                 content_top = content_top.max(h);
                 if h < SEA_LEVEL {
                     content_top = content_top.max(SEA_LEVEL);
@@ -171,6 +191,10 @@ impl World {
             }
         }
 
+        // Ağaçlar yalnızca havanın yerine opak blok koyar; yeni açık hücre
+        // oluşturmaz. Oyuncu düzenlemeleri ise oluşturabilir.
+        let mut min_open = min_h + 1;
+
         if let Some(ed) = self.edits.get(&key) {
             for (&idx, &v) in ed {
                 data[idx] = v;
@@ -178,12 +202,15 @@ impl World {
                 if y > content_top {
                     content_top = y;
                 }
+                if y < min_open && !is_opaque(v) {
+                    min_open = y;
+                }
             }
         }
 
         self.chunks.insert(
             key,
-            Chunk { cx, cz, data, meshed: false, content_top, faces: 0 },
+            Chunk { cx, cz, data, meshed: false, content_top, min_open },
         );
         key
     }
@@ -240,6 +267,47 @@ impl World {
         let h = self.height_at(0, 0);
         [0.5, h as f64 + 1.02, 0.5]
     }
+}
+
+/// Oyuncunun chunk'ı `(pcx, pcz)` iken akışın istediği chunk'ları hesaplar.
+/// Her iki liste de `(cx, cz, uzaklık²)` biçimindedir ve yakından uzağa
+/// sıralıdır.
+///
+/// * `mesh` — `render_dist` yarıçaplı dairedeki, çizilecek chunk'lar.
+/// * `data` — verisi üretilecek chunk'lar: `mesh`'teki her chunk'ın **8
+///   komşusunun tamamı**. Mesh üretimi köşe komşularını da okur (ambient
+///   occlusion), bu yüzden veri kümesi yalnızca "bir halka daha geniş daire"
+///   olamaz: dairenin kenarındaki chunk'ların çapraz komşuları o dairenin
+///   dışında kalır ve bu chunk'lar hiçbir zaman mesh'lenemezdi.
+pub fn stream_plan(
+    pcx: i32,
+    pcz: i32,
+    render_dist: i32,
+    data: &mut Vec<(i32, i32, i32)>,
+    mesh: &mut Vec<(i32, i32, i32)>,
+) {
+    data.clear();
+    mesh.clear();
+    let r2 = render_dist * render_dist;
+    let reach = render_dist + 1;
+    for dz in -reach..=reach {
+        for dx in -reach..=reach {
+            // Bu chunk'a (Chebyshev) 1 uzaklıktaki chunk'lardan merkeze en
+            // yakın olanı daire içindeyse, bir mesh'in komşusudur.
+            let nx = (dx.abs() - 1).max(0);
+            let nz = (dz.abs() - 1).max(0);
+            if nx * nx + nz * nz > r2 {
+                continue;
+            }
+            let d2 = dx * dx + dz * dz;
+            data.push((pcx + dx, pcz + dz, d2));
+            if d2 <= r2 {
+                mesh.push((pcx + dx, pcz + dz, d2));
+            }
+        }
+    }
+    data.sort_by_key(|e| e.2);
+    mesh.sort_by_key(|e| e.2);
 }
 
 /// Ağacı **yalnızca bu chunk'a ait** hücrelere yazar (taşan kısımlar atlanır,
@@ -308,6 +376,18 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for cz in -40..40 {
             for cx in -40..40 {
+                assert!(seen.insert(ckey(cx, cz)), "anahtar çakıştı: {cx},{cz}");
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_key_is_injective_far_from_origin() {
+        // Eski 18 bitlik paketleme ±131072 chunk'ta (±2 milyon blok) sarıyordu.
+        let far = [-200_000, -131_072, -1, 0, 1, 131_072, 200_000, i32::MAX, i32::MIN];
+        let mut seen = std::collections::HashSet::new();
+        for &cx in &far {
+            for &cz in &far {
                 assert!(seen.insert(ckey(cx, cz)), "anahtar çakıştı: {cx},{cz}");
             }
         }
@@ -434,6 +514,82 @@ mod tests {
         w.generate_chunk(3000 >> 4, 3000 >> 4);
 
         assert_eq!(w.get_block(3000, h + 1, 3000), BRICK, "oyuncu değişikliği kayboldu");
+    }
+
+    /// Mesh'in alt sınırı `min_open`'dan gelir: üretimde en alçak sütunun
+    /// hemen üstüdür, oyuncu kazdıkça düşer ve yeniden üretimde korunur.
+    #[test]
+    fn min_open_tracks_the_lowest_non_opaque_cell() {
+        let mut w = world();
+        let (cx, cz) = (3000 >> 4, 3000 >> 4);
+        w.generate_chunk(cx, cz);
+        let key = ckey(cx, cz);
+
+        let mut min_h = WORLD_HEIGHT;
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                min_h = min_h.min(w.height_at(cx * CHUNK_SIZE + x, cz * CHUNK_SIZE + z));
+            }
+        }
+        assert_eq!(w.chunks[&key].min_open, min_h + 1, "üretimde en alçak sütunun üstü olmalı");
+
+        // Opak blok koymak açık hücre oluşturmaz.
+        assert!(w.set_block_raw(3000, 2, 3000, BRICK));
+        assert_eq!(w.chunks[&key].min_open, min_h + 1);
+
+        // Yüzeyin altında boşluk açmak sınırı aşağı çeker (hava, su ve cam).
+        assert!(w.set_block_raw(3000, 9, 3000, GLASS));
+        assert_eq!(w.chunks[&key].min_open, 9);
+        assert!(w.set_block_raw(3000, 5, 3000, AIR));
+        assert_eq!(w.chunks[&key].min_open, 5);
+
+        // Chunk boşaltılıp yeniden üretilince düzenlemelerden geri hesaplanır.
+        w.unload_chunk(key);
+        w.generate_chunk(cx, cz);
+        assert_eq!(w.chunks[&key].min_open, 5, "yeniden üretimde alt sınır kayboldu");
+    }
+
+    /// Mesh'lenecek her chunk'ın 8 komşusu da veri kümesinde olmalı; aksi
+    /// hâlde görüş dairesinin kenarındaki chunk'lar hiç çizilemez.
+    #[test]
+    fn stream_plan_requests_every_neighbour_of_every_mesh_chunk() {
+        let (mut data, mut mesh) = (Vec::new(), Vec::new());
+        for r in 3..=16 {
+            stream_plan(7, -4, r, &mut data, &mut mesh);
+            let have: std::collections::HashSet<(i32, i32)> =
+                data.iter().map(|e| (e.0, e.1)).collect();
+            let wanted: std::collections::HashSet<(i32, i32)> =
+                mesh.iter().map(|e| (e.0, e.1)).collect();
+            assert_eq!(have.len(), data.len(), "veri listesinde yinelenen chunk");
+
+            for &(cx, cz, d2) in &mesh {
+                assert!(d2 <= r * r);
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        assert!(
+                            have.contains(&(cx + dx, cz + dz)),
+                            "r={r}: ({cx},{cz}) mesh'inin komşusu ({},{}) istenmiyor",
+                            cx + dx,
+                            cz + dz
+                        );
+                    }
+                }
+            }
+
+            let keep = (r + KEEP_MARGIN) * (r + KEEP_MARGIN);
+            for &(cx, cz, d2) in &data {
+                // Gereksiz chunk üretilmemeli: her veri chunk'ı bir mesh'e komşu.
+                let used = (-1..=1)
+                    .any(|dz| (-1..=1).any(|dx| wanted.contains(&(cx + dx, cz + dz))));
+                assert!(used, "r={r}: ({cx},{cz}) hiçbir mesh'e komşu değil");
+                // ... ve temizlik yarıçapının içinde kalmalı (üret-sil döngüsü olmasın).
+                assert!(d2 <= keep, "r={r}: ({cx},{cz}) saklama yarıçapının dışında");
+            }
+
+            assert!(data.windows(2).all(|p| p[0].2 <= p[1].2), "veri yakından uzağa değil");
+            assert!(mesh.windows(2).all(|p| p[0].2 <= p[1].2), "mesh yakından uzağa değil");
+            assert_eq!((mesh[0].0, mesh[0].1), (7, -4), "ilk mesh oyuncunun chunk'ı olmalı");
+        }
     }
 
     #[test]
