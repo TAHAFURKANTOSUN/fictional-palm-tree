@@ -42,12 +42,16 @@ layout(location = 0) in vec4 a_pos;
 layout(location = 1) in vec3 a_col;
 uniform mat4 u_viewProj;
 uniform vec3 u_origin;
+uniform vec2 u_camMod;
 out vec2 v_uv;
 out vec3 v_col;
 out float v_dist;
+out highp vec2 v_wpos;
 void main() {
   vec3 p = a_pos.xyz + u_origin;
   gl_Position = u_viewProj * vec4(p, 1.0);
+  // Dünya konumu (64 blokta bir saran): su parıltısı kamerayla kaymasın.
+  v_wpos = p.xz + u_camMod;
   float corner = floor(a_pos.w / 16.0);
   float tile = a_pos.w - corner * 16.0;
   float cu = (corner == 1.0 || corner == 2.0) ? 1.0 : 0.0;
@@ -63,7 +67,10 @@ precision mediump float;
 in vec2 v_uv;
 in vec3 v_col;
 in float v_dist;
+in highp vec2 v_wpos;
 uniform sampler2D u_atlas;
+uniform float u_water;
+uniform float u_time;
 uniform vec3 u_fogColor;
 uniform float u_fogNear;
 uniform float u_fogFar;
@@ -74,6 +81,13 @@ void main() {
   vec4 t = texture(u_atlas, v_uv);
   if (t.a < u_alphaTest) discard;
   vec3 c = t.rgb * v_col;
+  if (u_water > 0.5) {
+    // Dalga boyları 64'ün tam bölenleri: sarma noktasında dikiş oluşmaz.
+    highp vec2 w = floor(v_wpos * 8.0) / 8.0 * 0.0981748;
+    float ripple = sin(w.x * 11.0 + u_time * 1.4) * sin(w.y * 7.0 - u_time * 1.1)
+                 + 0.6 * sin((w.x + w.y) * 17.0 + u_time * 2.0);
+    c *= 1.0 + 0.07 * ripple;
+  }
   float f = clamp((v_dist - u_fogNear) / max(u_fogFar - u_fogNear, 0.001), 0.0, 1.0);
   fragColor = vec4(mix(c, u_fogColor, f), t.a * u_opacity);
 }
@@ -132,6 +146,11 @@ void main() {
   float h = clamp(dir.y * 1.55 + 0.12, 0.0, 1.0);
   vec3 sky = mix(u_horizon, u_top, pow(h, 0.8));
 
+  // Güneş: keskin disk + geniş, yumuşak hale.
+  float sun = max(dot(dir, normalize(vec3(0.60, 0.58, 0.55))), 0.0);
+  sky += vec3(1.0, 0.82, 0.55) * pow(sun, 10.0) * 0.16;
+  sky = mix(sky, vec3(1.0, 0.97, 0.86), smoothstep(0.9988, 0.9993, sun));
+
   if (dir.y > 0.03) {
     vec2 cp = dir.xz / max(dir.y, 0.03) * 0.32 + vec2(u_time * 0.006, u_time * 0.0022);
     float n = fbm(cp * 1.7);
@@ -170,6 +189,9 @@ float hash(vec2 p) {
   return fract(p.x * p.y);
 }
 void main() {
+  // Bakılan bloğun ince çerçevesi.
+  vec2 edge = min(v_uv, 1.0 - v_uv);
+  if (min(edge.x, edge.y) < 0.018) { fragColor = vec4(0.0, 0.0, 0.0, 0.55); return; }
   vec2 cell = floor(v_uv * 16.0);
   float d = length((cell + 0.5) / 16.0 - 0.5);
   float t = hash(cell) * 0.6 + d * 0.8;
@@ -205,8 +227,10 @@ const PARTICLE_BYTES: usize = 20;
 
 /// Bir karede çizilecek kırma efektleri.
 pub struct FrameEffects<'a> {
-    /// Kazılan blok ve ilerlemesi (0..1).
+    /// Bakılan blok (çerçevesi çizilir) ve kazma ilerlemesi (0..1).
     pub crack: Option<([i32; 3], f32)>,
+    /// Göz suyun içinde: mavi, yakın bir sis kullanılır.
+    pub underwater: bool,
     pub particles: &'a [Particle],
 }
 
@@ -258,6 +282,9 @@ pub struct Renderer {
 
     u_view_proj: Option<WebGlUniformLocation>,
     u_origin: Option<WebGlUniformLocation>,
+    u_cam_mod: Option<WebGlUniformLocation>,
+    u_water: Option<WebGlUniformLocation>,
+    u_time: Option<WebGlUniformLocation>,
     u_fog_color: Option<WebGlUniformLocation>,
     u_fog_near: Option<WebGlUniformLocation>,
     u_fog_far: Option<WebGlUniformLocation>,
@@ -467,6 +494,9 @@ impl Renderer {
         let mut r = Self {
             u_view_proj: u("u_viewProj"),
             u_origin: u("u_origin"),
+            u_cam_mod: u("u_camMod"),
+            u_water: u("u_water"),
+            u_time: u("u_time"),
             u_fog_color: u("u_fogColor"),
             u_fog_near: u("u_fogNear"),
             u_fog_far: u("u_fogFar"),
@@ -627,23 +657,31 @@ impl Renderer {
         }
         visible.sort_unstable_by(|a, b| a.dist2.total_cmp(&b.dist2));
 
+        // Su altında: gökyüzü yerine su rengi, sis yakın ve mavi.
+        let water_color = [0.10, 0.32, 0.58];
+        let (fog_color, fog_near, fog_far) =
+            if fx.underwater { (water_color, 0.0, fog_far.min(28.0)) } else { (self.fog_color, fog_near, fog_far) };
+        let clear = if fx.underwater { water_color } else { self.sky_horizon };
+
         let gl = &self.gl;
         gl.enable(GL::DEPTH_TEST);
         gl.depth_func(GL::LEQUAL);
         gl.depth_mask(true);
         gl.enable(GL::CULL_FACE);
         gl.cull_face(GL::BACK);
-        gl.clear_color(self.sky_horizon[0], self.sky_horizon[1], self.sky_horizon[2], 1.0);
+        gl.clear_color(clear[0], clear[1], clear[2], 1.0);
         gl.clear(GL::COLOR_BUFFER_BIT | GL::DEPTH_BUFFER_BIT);
 
         gl.use_program(Some(&self.prog));
         gl.uniform_matrix4fv_with_f32_array(self.u_view_proj.as_ref(), false, &view_proj);
-        gl.uniform3f(
-            self.u_fog_color.as_ref(),
-            self.fog_color[0],
-            self.fog_color[1],
-            self.fog_color[2],
+        gl.uniform3f(self.u_fog_color.as_ref(), fog_color[0], fog_color[1], fog_color[2]);
+        gl.uniform2f(
+            self.u_cam_mod.as_ref(),
+            cam_pos[0].rem_euclid(64.0) as f32,
+            cam_pos[2].rem_euclid(64.0) as f32,
         );
+        gl.uniform1f(self.u_time.as_ref(), time);
+        gl.uniform1f(self.u_water.as_ref(), 0.0);
         gl.uniform1f(self.u_fog_near.as_ref(), fog_near);
         gl.uniform1f(self.u_fog_far.as_ref(), fog_far);
         gl.active_texture(GL::TEXTURE0);
@@ -675,6 +713,7 @@ impl Renderer {
         //    hesaplanır (derinlik tamponu 1.0 olan yerler, `LEQUAL` ile geçer).
         gl.depth_mask(false);
         gl.use_program(Some(&self.sky_prog));
+        let sky_vertices = if fx.underwater { 0 } else { 3 };
         let dir = [
             -yaw.sin() * pitch.cos(),
             pitch.sin(),
@@ -700,7 +739,7 @@ impl Renderer {
         );
         gl.uniform1f(self.s_time.as_ref(), time);
         gl.bind_vertex_array(Some(&self.sky_vao));
-        gl.draw_arrays(GL::TRIANGLES, 0, 3);
+        gl.draw_arrays(GL::TRIANGLES, 0, sky_vertices);
         gl.depth_mask(true);
 
         // 2b) Kırma efektleri: parçacıklar opak, çatlak kaplaması harmanlı.
@@ -748,6 +787,7 @@ impl Renderer {
         gl.enable(GL::BLEND);
         gl.blend_func(GL::SRC_ALPHA, GL::ONE_MINUS_SRC_ALPHA);
         gl.uniform1f(self.u_opacity.as_ref(), 0.82);
+        gl.uniform1f(self.u_water.as_ref(), 1.0);
         gl.uniform1f(self.u_alpha_test.as_ref(), 0.01);
         for v in visible.iter().rev() {
             if let Some(layer) = &self.chunks[v.index as usize].liquid {

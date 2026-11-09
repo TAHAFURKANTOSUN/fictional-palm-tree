@@ -51,6 +51,8 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - 🔭 **Uzakta da net** — çizim kameraya göre yapılır; orijinden 1.000.000 blok
   uzakta bile geometri titremez.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
+- 🌅 **Görsel dokunuşlar** — güneş ve halesi, dalgalanan su parıltısı, su altı
+  sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
 - ✅ **142 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.

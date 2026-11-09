@@ -102,6 +102,8 @@ struct Game {
     doomed: Vec<(i32, i32)>,
     /// Son karenin gerçek süresi (sn); akış bütçesini belirler.
     last_frame_dt: f64,
+    /// Koşarken görüş açısının yumuşakça genişlemesi (0..1).
+    fov_kick: f32,
     governor: QualityGovernor,
     render_scale: f32,
     gov_time: f64,
@@ -760,6 +762,10 @@ impl Game {
         }
 
         self.sprinting = sprinting;
+
+        // Koşarken (ve gerçekten ilerlerken) görüş açısı hafifçe genişler.
+        let kick = if sprinting && self.moved_dist > 0.0 { 1.0 } else { 0.0 };
+        self.fov_kick += (kick - self.fov_kick) * (dt as f32 * 8.0).min(1.0);
     }
 
     fn update_survival(&mut self, dt: f64) {
@@ -791,17 +797,33 @@ impl Game {
             self.player.pos[2],
         ];
 
+        // Bakılan bloğun çerçevesi (arayüz gizliyken ya da envanterde çizilmez);
+        // kazılıyorsa çatlak ilerlemesiyle birlikte.
+        let crack = if self.started && self.hud_visible && !self.inv_open && !self.survival.dead {
+            self.target().filter(|h| h.y > 0).map(|h| {
+                let block = [h.x, h.y, h.z];
+                let progress = if self.mining.target == Some(block) { self.mining.progress as f32 } else { 0.0 };
+                (block, progress)
+            })
+        } else {
+            None
+        };
+
         self.renderer.render(
             cam,
             self.player.yaw as f32,
             self.player.pitch as f32,
-            FOV_Y,
+            FOV_Y * (1.0 + 0.07 * self.fov_kick),
             aspect,
             reach + 64.0,
             reach * 0.55,
             reach - 2.0,
             self.time,
-            &FrameEffects { crack: self.mining.crack(), particles: &self.particles.list },
+            &FrameEffects {
+                crack,
+                underwater: self.player.eye_in_water(&self.world),
+                particles: &self.particles.list,
+            },
         );
 
         self.hud.draw(&HudFrame {
@@ -1464,6 +1486,7 @@ pub fn start() -> Result<(), JsValue> {
         last_pcz: pcz,
         doomed: Vec::new(),
         last_frame_dt: 0.0,
+        fov_kick: 0.0,
         governor: QualityGovernor::default(),
         render_scale: 1.0,
         gov_time: 0.0,
