@@ -71,6 +71,7 @@ in highp vec2 v_wpos;
 uniform sampler2D u_atlas;
 uniform float u_water;
 uniform float u_time;
+uniform float u_light;
 uniform vec3 u_fogColor;
 uniform float u_fogNear;
 uniform float u_fogFar;
@@ -88,6 +89,7 @@ void main() {
                  + 0.6 * sin((w.x + w.y) * 17.0 + u_time * 2.0);
     c *= 1.0 + 0.07 * ripple;
   }
+  c *= u_light;
   float f = clamp((v_dist - u_fogNear) / max(u_fogFar - u_fogNear, 0.001), 0.0, 1.0);
   fragColor = vec4(mix(c, u_fogColor, f), t.a * u_opacity);
 }
@@ -114,6 +116,9 @@ uniform float u_aspect;
 uniform vec3 u_top;
 uniform vec3 u_horizon;
 uniform float u_time;
+uniform vec3 u_sun;
+uniform float u_stars;
+uniform float u_light;
 out vec4 fragColor;
 
 float hash(vec2 p) {
@@ -147,15 +152,28 @@ void main() {
   vec3 sky = mix(u_horizon, u_top, pow(h, 0.8));
 
   // Güneş: keskin disk + geniş, yumuşak hale.
-  float sun = max(dot(dir, normalize(vec3(0.60, 0.58, 0.55))), 0.0);
-  sky += vec3(1.0, 0.82, 0.55) * pow(sun, 10.0) * 0.16;
+  float sun = max(dot(dir, u_sun), 0.0);
+  sky += vec3(1.0, 0.72, 0.45) * pow(sun, 10.0) * 0.2 * smoothstep(-0.25, 0.1, u_sun.y);
   sky = mix(sky, vec3(1.0, 0.97, 0.86), smoothstep(0.9988, 0.9993, sun));
+
+  // Gece: yıldızlar ve güneşin tam karşısında ay.
+  if (u_stars > 0.01 && dir.y > 0.0) {
+    vec2 g = dir.xz / (dir.y + 0.35) * 130.0;
+    vec2 id = floor(g);
+    float star = step(0.988, hash(id)) * (0.4 + 0.6 * hash(id + 7.0))
+               * smoothstep(0.30, 0.08, length(fract(g) - 0.5));
+    // Küp alınır: yıldızlar ancak hava iyice kararınca belirir.
+    sky += vec3(star) * u_stars * u_stars * u_stars * smoothstep(0.0, 0.15, dir.y);
+  }
+  float moon = max(dot(dir, -u_sun), 0.0);
+  sky += vec3(0.5, 0.6, 0.8) * pow(moon, 40.0) * 0.12 * u_stars;
+  sky = mix(sky, vec3(0.86, 0.9, 0.98), smoothstep(0.9990, 0.9994, moon));
 
   if (dir.y > 0.03) {
     vec2 cp = dir.xz / max(dir.y, 0.03) * 0.32 + vec2(u_time * 0.006, u_time * 0.0022);
     float n = fbm(cp * 1.7);
     float cl = smoothstep(0.50, 0.80, n) * smoothstep(0.03, 0.28, dir.y);
-    sky = mix(sky, vec3(1.0), cl * 0.82);
+    sky = mix(sky, mix(vec3(0.10, 0.12, 0.2), vec3(1.0), u_light), cl * 0.82);
   }
 
   fragColor = vec4(sky, 1.0);
@@ -207,11 +225,12 @@ layout(location = 1) in float a_size;
 layout(location = 2) in vec3 a_col;
 uniform mat4 u_viewProj;
 uniform float u_pixelScale;
+uniform float u_light;
 out vec3 v_col;
 void main() {
   gl_Position = u_viewProj * vec4(a_pos, 1.0);
   gl_PointSize = max(a_size * u_pixelScale / gl_Position.w, 1.0);
-  v_col = a_col;
+  v_col = a_col * u_light;
 }
 "#;
 
@@ -285,6 +304,7 @@ pub struct Renderer {
     u_cam_mod: Option<WebGlUniformLocation>,
     u_water: Option<WebGlUniformLocation>,
     u_time: Option<WebGlUniformLocation>,
+    u_light: Option<WebGlUniformLocation>,
     u_fog_color: Option<WebGlUniformLocation>,
     u_fog_near: Option<WebGlUniformLocation>,
     u_fog_far: Option<WebGlUniformLocation>,
@@ -299,6 +319,10 @@ pub struct Renderer {
     s_top: Option<WebGlUniformLocation>,
     s_horizon: Option<WebGlUniformLocation>,
     s_time: Option<WebGlUniformLocation>,
+    s_sun: Option<WebGlUniformLocation>,
+    s_stars: Option<WebGlUniformLocation>,
+    s_light: Option<WebGlUniformLocation>,
+    p_light: Option<WebGlUniformLocation>,
 
     /// Yoğun dizi + anahtar → indeks eşlemesi: kare başına gezinme `HashMap`
     /// araması gerektirmez.
@@ -310,6 +334,10 @@ pub struct Renderer {
     pub fog_color: [f32; 3],
     pub sky_top: [f32; 3],
     pub sky_horizon: [f32; 3],
+    /// Gündüz–gece döngüsü (bkz. `sky`): güneş yönü, ortam ışığı, yıldızlar.
+    pub sun_dir: [f32; 3],
+    pub light: f32,
+    pub stars: f32,
     pub stats_draws: u32,
     pub stats_tris: u32,
 }
@@ -497,6 +525,11 @@ impl Renderer {
             u_cam_mod: u("u_camMod"),
             u_water: u("u_water"),
             u_time: u("u_time"),
+            u_light: u("u_light"),
+            s_sun: su("u_sun"),
+            s_stars: su("u_stars"),
+            s_light: su("u_light"),
+            p_light: gl.get_uniform_location(&particle_prog, "u_light"),
             u_fog_color: u("u_fogColor"),
             u_fog_near: u("u_fogNear"),
             u_fog_far: u("u_fogFar"),
@@ -537,6 +570,9 @@ impl Renderer {
             fog_color: [0.81, 0.90, 0.98],
             sky_top: [0.35, 0.65, 0.94],
             sky_horizon: [0.81, 0.90, 0.98],
+            sun_dir: [0.6, 0.58, 0.55],
+            light: 1.0,
+            stars: 0.0,
             stats_draws: 0,
             stats_tris: 0,
         };
@@ -658,7 +694,7 @@ impl Renderer {
         visible.sort_unstable_by(|a, b| a.dist2.total_cmp(&b.dist2));
 
         // Su altında: gökyüzü yerine su rengi, sis yakın ve mavi.
-        let water_color = [0.10, 0.32, 0.58];
+        let water_color = [0.10 * self.light, 0.32 * self.light, 0.58 * self.light];
         let (fog_color, fog_near, fog_far) =
             if fx.underwater { (water_color, 0.0, fog_far.min(28.0)) } else { (self.fog_color, fog_near, fog_far) };
         let clear = if fx.underwater { water_color } else { self.sky_horizon };
@@ -682,6 +718,7 @@ impl Renderer {
         );
         gl.uniform1f(self.u_time.as_ref(), time);
         gl.uniform1f(self.u_water.as_ref(), 0.0);
+        gl.uniform1f(self.u_light.as_ref(), self.light);
         gl.uniform1f(self.u_fog_near.as_ref(), fog_near);
         gl.uniform1f(self.u_fog_far.as_ref(), fog_far);
         gl.active_texture(GL::TEXTURE0);
@@ -738,6 +775,9 @@ impl Renderer {
             self.sky_horizon[2],
         );
         gl.uniform1f(self.s_time.as_ref(), time);
+        gl.uniform3f(self.s_sun.as_ref(), self.sun_dir[0], self.sun_dir[1], self.sun_dir[2]);
+        gl.uniform1f(self.s_stars.as_ref(), self.stars);
+        gl.uniform1f(self.s_light.as_ref(), self.light);
         gl.bind_vertex_array(Some(&self.sky_vao));
         gl.draw_arrays(GL::TRIANGLES, 0, sky_vertices);
         gl.depth_mask(true);
@@ -758,6 +798,7 @@ impl Renderer {
             // Dünya birimi → piksel: ekran yüksekliği / (2·tan(fov/2)).
             let scale = self.viewport_h / (2.0 * (fov_y * 0.5).tan());
             gl.uniform1f(self.p_pixel_scale.as_ref(), scale);
+            gl.uniform1f(self.p_light.as_ref(), self.light);
             gl.bind_vertex_array(Some(&self.particle_vao));
             gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.particle_vbo));
             gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, &bytes, GL::DYNAMIC_DRAW);

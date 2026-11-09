@@ -191,7 +191,7 @@ impl World {
             }
         }
 
-        // Ağaçlar yalnızca havanın yerine opak blok koyar; yeni açık hücre
+        // Ağaçlar zeminin üstündedir; alt sınırı aşağı çekecek açık hücre
         // oluşturmaz. Oyuncu düzenlemeleri ise oluşturabilir.
         let mut min_open = min_h + 1;
 

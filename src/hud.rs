@@ -82,6 +82,8 @@ pub struct DebugInfo {
     pub draws: u32,
     pub tris: u32,
     pub render_dist: i32,
+    /// Günün saati, dakika cinsinden (10 dakikaya yuvarlı).
+    pub clock: u32,
 }
 
 /// Çizilen görüntüyü belirleyen durumun özeti: iki özet eşitse iki çizim de
@@ -638,6 +640,7 @@ impl Hud {
             ("Konum", format!("{}, {}, {}", d.pos[0], d.pos[1], d.pos[2])),
             ("Bölge", format!("{} yüklü", d.chunks)),
             ("Mesafe", format!("{} bölge", d.render_dist)),
+            ("Saat", format!("{:02}:{:02}", d.clock / 60, d.clock % 60)),
             ("Çizim", format!("{} · {:.0}k üçgen", d.draws, d.tris as f64 / 1000.0)),
             ("Mod", if f.flying { "Uçuş" } else { "Yürüyüş" }.to_string()),
             ("Oyun", f.survival.mode.label().to_string()),

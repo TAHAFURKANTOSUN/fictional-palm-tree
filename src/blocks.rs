@@ -88,7 +88,8 @@ const BLOCK_TABLE: [BlockDef; BLOCK_COUNT] = [
     def("Parke Taşı", T_COBBLE, T_COBBLE, T_COBBLE, false, [1.0, 1.0, 1.0], false),
     def("Kum", T_SAND, T_SAND, T_SAND, false, [1.0, 1.0, 1.0], false),
     def("Kütük", T_LOG_TOP, T_LOG_TOP, T_LOG_SIDE, false, [1.0, 1.0, 1.0], false),
-    def("Yaprak", T_LEAVES, T_LEAVES, T_LEAVES, false, [1.0, 1.0, 1.0], true),
+    // Yaprak dokusunda delikler vardır: arkası görünür, komşu yüzleri gizlemez.
+    def("Yaprak", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], true),
     def("Tahta", T_PLANKS, T_PLANKS, T_PLANKS, false, [1.0, 1.0, 1.0], false),
     def("Tuğla", T_BRICK, T_BRICK, T_BRICK, false, [1.0, 1.0, 1.0], false),
     def("Cam", T_GLASS, T_GLASS, T_GLASS, true, [1.0, 1.0, 1.0], false),
@@ -206,7 +207,7 @@ mod tests {
             );
         }
         assert!(!is_opaque(WATER) && !is_opaque(GLASS));
-        assert!(is_opaque(LEAVES), "yaprak komşu yüzleri gizler");
+        assert!(!is_opaque(LEAVES), "yaprak delikli: arkasındaki yüzler çizilmeli");
         // Tanımsız kimlikler hava gibi davranır.
         assert!(!is_opaque(200));
     }

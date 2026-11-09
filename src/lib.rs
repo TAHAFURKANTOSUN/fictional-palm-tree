@@ -5,7 +5,7 @@
 //! Motor bilerek ikiye ayrılmıştır:
 //!
 //! * **Saf çekirdek** (`blocks`, `world`, `noise`, `mesh`, `atlas`, `raycast`,
-//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `pacing`, `mat4`) — hiçbir tarayıcı
+//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
 //!   API'si kullanmaz. `cargo test` ile tarayıcı olmadan doğrulanabilir.
 //! * **Tarayıcı katmanı** (`app`, `gl`, `hud`) — yalnızca `wasm32` hedefinde
 //!   derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
@@ -21,6 +21,7 @@ pub mod noise;
 pub mod pacing;
 pub mod player;
 pub mod raycast;
+pub mod sky;
 pub mod survival;
 pub mod world;
 
@@ -73,6 +74,13 @@ pub fn debug_set_mode(creative: bool) {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn debug_set_look(yaw: f64, pitch: f64) {
     app::debug_set_look(yaw, pitch)
+}
+
+/// Günün saatini ayarlar (0 = gün doğumu, 0.35 = öğle, 0.7 = gün batımı).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_set_time(t: f64) {
+    app::debug_set_time(t)
 }
 
 #[cfg(target_arch = "wasm32")]

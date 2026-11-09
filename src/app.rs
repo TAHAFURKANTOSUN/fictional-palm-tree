@@ -23,6 +23,7 @@ use crate::mesh::{self, MeshBuffers};
 use crate::pacing::QualityGovernor;
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
+use crate::sky::{clock_hours, sky_state, DAY_LENGTH, START_TIME};
 use crate::survival::{Event, GameMode, Survival, TickInput};
 use crate::world::{ckey, stream_plan, World, CHUNK_SIZE, KEEP_MARGIN};
 
@@ -104,6 +105,8 @@ struct Game {
     last_frame_dt: f64,
     /// Koşarken görüş açısının yumuşakça genişlemesi (0..1).
     fov_kick: f32,
+    /// Günün zamanı, 0..1 (0 = gün doğumu).
+    day_time: f64,
     governor: QualityGovernor,
     render_scale: f32,
     gov_time: f64,
@@ -579,6 +582,9 @@ impl Game {
             }
         }
 
+        if self.started {
+            self.day_time = (self.day_time + dt / DAY_LENGTH).rem_euclid(1.0);
+        }
         self.update_chunks();
         self.update_player(dt);
         self.update_mining(dt);
@@ -638,6 +644,7 @@ impl Game {
                 draws: self.renderer.stats_draws,
                 tris: self.renderer.stats_tris,
                 render_dist: self.render_dist,
+                clock: ((clock_hours(self.day_time) * 6.0).floor() as u32 * 10) % 1440,
             };
         }
     }
@@ -796,6 +803,14 @@ impl Game {
             self.player.pos[1] + self.player.eye_height,
             self.player.pos[2],
         ];
+
+        let sky = sky_state(self.day_time);
+        self.renderer.sky_top = sky.top;
+        self.renderer.sky_horizon = sky.horizon;
+        self.renderer.fog_color = sky.horizon;
+        self.renderer.sun_dir = sky.sun_dir;
+        self.renderer.light = sky.light;
+        self.renderer.stars = sky.stars;
 
         // Bakılan bloğun çerçevesi (arayüz gizliyken ya da envanterde çizilmez);
         // kazılıyorsa çatlak ilerlemesiyle birlikte.
@@ -1284,6 +1299,10 @@ pub fn debug_break() {
     with_game(|g| g.break_block());
 }
 
+pub fn debug_set_time(t: f64) {
+    with_game(|g| g.day_time = t.rem_euclid(1.0));
+}
+
 pub fn debug_hold_break(on: bool) {
     with_game(|g| if on { g.start_mining() } else { g.stop_mining() });
 }
@@ -1487,6 +1506,7 @@ pub fn start() -> Result<(), JsValue> {
         doomed: Vec::new(),
         last_frame_dt: 0.0,
         fov_kick: 0.0,
+        day_time: START_TIME,
         governor: QualityGovernor::default(),
         render_scale: 1.0,
         gov_time: 0.0,
