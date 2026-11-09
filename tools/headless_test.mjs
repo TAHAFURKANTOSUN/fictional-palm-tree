@@ -226,6 +226,25 @@ async function main() {
   out.flyBlocked = afterEat.flying === false;
   expect('hayatta kalmada uçuş kapalı', out.flyBlocked);
 
+  // ---- 11b) Kazma animasyonu: basılı tutunca ilerleme, kırılınca parçacık ----
+  {
+    await evalJs(`window.__vcRs.debug_set_look(2.4, -0.55); window.__vcRs.debug_hold_break(true); 1`);
+    let progressed = false, burst = false;
+    for (let i = 0; i < 400 && !burst; i++) {
+      const s = await state();
+      progressed ||= s.mining > 0 && s.mining < 1;
+      burst = s.particles > 0;
+      await sleep(25);
+    }
+    await evalJs(`window.__vcRs.debug_hold_break(false); 1`);
+    await sleep(200);
+    const s = await state();
+    out.mining = { progressed, burst, afterRelease: s.mining };
+    expect('kazma: blok anında değil, ilerleyerek kırılır', progressed);
+    expect('kazma: kırılınca parçacık saçılır', burst);
+    expect('kazma: tık bırakılınca ilerleme sıfırlanır', s.mining === 0, s.mining);
+  }
+
   // ---- 12) FPS + çizim (yatay bakış) ----
   await evalJs(`window.__vcRs.debug_set_look(0.9, -0.05); 1`);
   await sleep(2500);

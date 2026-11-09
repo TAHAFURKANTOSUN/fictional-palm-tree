@@ -20,8 +20,9 @@ use web_sys::{
 };
 
 use crate::atlas::{ATLAS_COLS, ATLAS_H, ATLAS_W, TILE};
+use crate::effects::Particle;
 use crate::mat4::{self, Frustum};
-use crate::mesh::{MeshBuffers, MeshData, CORNER_SHIFT, VERTEX_BYTES};
+use crate::mesh::{MeshBuffers, MeshData, CORNER_SHIFT, FACES, VERTEX_BYTES};
 use crate::world::CHUNK_SIZE;
 
 const STRIDE: i32 = VERTEX_BYTES as i32;
@@ -142,6 +143,73 @@ void main() {
 }
 "#;
 
+/// Kazılan bloğun üstüne çizilen çatlak kaplaması: bloktan bir tık büyük bir
+/// küp. Desen dokudan değil, 16×16'lık "piksel" ızgarasında gürültüden
+/// üretilir ve ilerleme arttıkça merkezden kenarlara yayılır.
+const CRACK_VS: &str = r#"#version 300 es
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec2 a_uv;
+uniform mat4 u_viewProj;
+uniform vec3 u_origin;
+out vec2 v_uv;
+void main() {
+  vec3 p = (a_pos - 0.5) * 1.004 + 0.5 + u_origin;
+  gl_Position = u_viewProj * vec4(p, 1.0);
+  v_uv = a_uv;
+}
+"#;
+
+const CRACK_FS: &str = r#"#version 300 es
+precision mediump float;
+in vec2 v_uv;
+uniform float u_progress;
+out vec4 fragColor;
+float hash(vec2 p) {
+  p = fract(p * vec2(123.34, 345.45));
+  p += dot(p, p + 34.345);
+  return fract(p.x * p.y);
+}
+void main() {
+  vec2 cell = floor(v_uv * 16.0);
+  float d = length((cell + 0.5) / 16.0 - 0.5);
+  float t = hash(cell) * 0.6 + d * 0.8;
+  if (t > u_progress * 0.85) discard;
+  fragColor = vec4(0.0, 0.0, 0.0, 0.5);
+}
+"#;
+
+/// Kırılma parçacıkları: dünya boyutuna göre ölçeklenen kare noktalar.
+const PARTICLE_VS: &str = r#"#version 300 es
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in float a_size;
+layout(location = 2) in vec3 a_col;
+uniform mat4 u_viewProj;
+uniform float u_pixelScale;
+out vec3 v_col;
+void main() {
+  gl_Position = u_viewProj * vec4(a_pos, 1.0);
+  gl_PointSize = max(a_size * u_pixelScale / gl_Position.w, 1.0);
+  v_col = a_col;
+}
+"#;
+
+const PARTICLE_FS: &str = r#"#version 300 es
+precision mediump float;
+in vec3 v_col;
+out vec4 fragColor;
+void main() { fragColor = vec4(v_col, 1.0); }
+"#;
+
+/// Parçacık başına bayt: konum (3×f32) + boyut (f32) + renk (4×u8).
+const PARTICLE_BYTES: usize = 20;
+
+/// Bir karede çizilecek kırma efektleri.
+pub struct FrameEffects<'a> {
+    /// Kazılan blok ve ilerlemesi (0..1).
+    pub crack: Option<([i32; 3], f32)>,
+    pub particles: &'a [Particle],
+}
+
 struct GpuLayer {
     vao: WebGlVertexArrayObject,
     vbo: WebGlBuffer,
@@ -175,6 +243,18 @@ pub struct Renderer {
     /// Tüm chunk'ların paylaştığı `0,1,2, 0,2,3` indeks tamponu.
     quad_ibo: WebGlBuffer,
     quad_capacity: u32,
+
+    crack_prog: WebGlProgram,
+    crack_vao: WebGlVertexArrayObject,
+    c_view_proj: Option<WebGlUniformLocation>,
+    c_origin: Option<WebGlUniformLocation>,
+    c_progress: Option<WebGlUniformLocation>,
+    particle_prog: WebGlProgram,
+    particle_vao: WebGlVertexArrayObject,
+    particle_vbo: WebGlBuffer,
+    p_view_proj: Option<WebGlUniformLocation>,
+    p_pixel_scale: Option<WebGlUniformLocation>,
+    viewport_h: f32,
 
     u_view_proj: Option<WebGlUniformLocation>,
     u_origin: Option<WebGlUniformLocation>,
@@ -341,6 +421,42 @@ impl Renderer {
 
         let quad_ibo = gl.create_buffer().ok_or("indeks tamponu oluşturulamadı")?;
 
+        // --- çatlak kaplaması: birim küp (konum + uv), 36 köşe ---
+        let crack_prog = link(&gl, CRACK_VS, CRACK_FS)?;
+        let crack_vao = gl.create_vertex_array().ok_or("çatlak VAO oluşturulamadı")?;
+        let crack_vbo = gl.create_buffer().ok_or("çatlak tamponu oluşturulamadı")?;
+        let mut cube: Vec<f32> = Vec::with_capacity(36 * 5);
+        for face in FACES.iter() {
+            for corner in [0usize, 1, 2, 0, 2, 3] {
+                let p = face.verts[corner];
+                let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]][corner];
+                cube.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32, uv[0], uv[1]]);
+            }
+        }
+        gl.bind_vertex_array(Some(&crack_vao));
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&crack_vbo));
+        let cube_arr = js_sys::Float32Array::from(&cube[..]);
+        gl.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &cube_arr, GL::STATIC_DRAW);
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 3, GL::FLOAT, false, 20, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 2, GL::FLOAT, false, 20, 12);
+
+        // --- parçacıklar: her karede yeniden doldurulan nokta tamponu ---
+        let particle_prog = link(&gl, PARTICLE_VS, PARTICLE_FS)?;
+        let particle_vao = gl.create_vertex_array().ok_or("parçacık VAO oluşturulamadı")?;
+        let particle_vbo = gl.create_buffer().ok_or("parçacık tamponu oluşturulamadı")?;
+        gl.bind_vertex_array(Some(&particle_vao));
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&particle_vbo));
+        let stride = PARTICLE_BYTES as i32;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 3, GL::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 1, GL::FLOAT, false, stride, 12);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(2, 3, GL::UNSIGNED_BYTE, true, stride, 16);
+        gl.bind_vertex_array(None);
+
         // Atlas her zaman 0. doku biriminde durur; örnekleyici bir kez ayarlanır.
         gl.use_program(Some(&prog));
         gl.uniform1i(gl.get_uniform_location(&prog, "u_atlas").as_ref(), 0);
@@ -365,6 +481,18 @@ impl Renderer {
             s_top: su("u_top"),
             s_horizon: su("u_horizon"),
             s_time: su("u_time"),
+
+            c_view_proj: gl.get_uniform_location(&crack_prog, "u_viewProj"),
+            c_origin: gl.get_uniform_location(&crack_prog, "u_origin"),
+            c_progress: gl.get_uniform_location(&crack_prog, "u_progress"),
+            p_view_proj: gl.get_uniform_location(&particle_prog, "u_viewProj"),
+            p_pixel_scale: gl.get_uniform_location(&particle_prog, "u_pixelScale"),
+            crack_prog,
+            crack_vao,
+            particle_prog,
+            particle_vao,
+            particle_vbo,
+            viewport_h: 1.0,
 
             gl,
             prog,
@@ -451,8 +579,9 @@ impl Renderer {
         self.chunks.len()
     }
 
-    pub fn resize(&self, w: i32, h: i32) {
+    pub fn resize(&mut self, w: i32, h: i32) {
         self.gl.viewport(0, 0, w, h);
+        self.viewport_h = h.max(1) as f32;
     }
 
     /// Bir kareyi çizer.
@@ -468,6 +597,7 @@ impl Renderer {
         fog_near: f32,
         fog_far: f32,
         time: f32,
+        fx: &FrameEffects,
     ) {
         // Kamera orijinde: matriste öteleme yok, chunk ofsetleri aşağıda.
         let view = mat4::view_rotation(yaw, pitch);
@@ -572,6 +702,46 @@ impl Renderer {
         gl.bind_vertex_array(Some(&self.sky_vao));
         gl.draw_arrays(GL::TRIANGLES, 0, 3);
         gl.depth_mask(true);
+
+        // 2b) Kırma efektleri: parçacıklar opak, çatlak kaplaması harmanlı.
+        //     Sudan önce çizilirler ki su altındaki blokta suyun arkasında kalsınlar.
+        if !fx.particles.is_empty() {
+            let mut bytes: Vec<u8> = Vec::with_capacity(fx.particles.len() * PARTICLE_BYTES);
+            for p in fx.particles {
+                for a in 0..3 {
+                    bytes.extend_from_slice(&((p.pos[a] - cam_pos[a]) as f32).to_le_bytes());
+                }
+                bytes.extend_from_slice(&p.size.to_le_bytes());
+                bytes.extend_from_slice(&[p.color[0], p.color[1], p.color[2], 255]);
+            }
+            gl.use_program(Some(&self.particle_prog));
+            gl.uniform_matrix4fv_with_f32_array(self.p_view_proj.as_ref(), false, &view_proj);
+            // Dünya birimi → piksel: ekran yüksekliği / (2·tan(fov/2)).
+            let scale = self.viewport_h / (2.0 * (fov_y * 0.5).tan());
+            gl.uniform1f(self.p_pixel_scale.as_ref(), scale);
+            gl.bind_vertex_array(Some(&self.particle_vao));
+            gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.particle_vbo));
+            gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, &bytes, GL::DYNAMIC_DRAW);
+            gl.draw_arrays(GL::POINTS, 0, fx.particles.len() as i32);
+            gl.bind_buffer(GL::ARRAY_BUFFER, None);
+        }
+        if let Some((block, progress)) = fx.crack {
+            gl.use_program(Some(&self.crack_prog));
+            gl.uniform_matrix4fv_with_f32_array(self.c_view_proj.as_ref(), false, &view_proj);
+            gl.uniform3f(
+                self.c_origin.as_ref(),
+                (block[0] as f64 - cam_pos[0]) as f32,
+                (block[1] as f64 - cam_pos[1]) as f32,
+                (block[2] as f64 - cam_pos[2]) as f32,
+            );
+            gl.uniform1f(self.c_progress.as_ref(), progress.clamp(0.0, 1.0));
+            gl.enable(GL::BLEND);
+            gl.blend_func(GL::SRC_ALPHA, GL::ONE_MINUS_SRC_ALPHA);
+            gl.depth_mask(false);
+            gl.bind_vertex_array(Some(&self.crack_vao));
+            gl.draw_arrays(GL::TRIANGLES, 0, 36);
+            gl.depth_mask(true);
+        }
 
         // 3) Sıvı katman (saydam), arkadan öne: harmanlama doğru sırayla olur.
         gl.use_program(Some(&self.prog));

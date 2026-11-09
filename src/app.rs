@@ -15,7 +15,8 @@ use web_sys::{
 
 use crate::blocks::{item_name, APPLE};
 use crate::crafting::{self, FillError, Grid};
-use crate::gl::Renderer;
+use crate::effects::{Mining, Particles};
+use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
 use crate::mesh::{self, MeshBuffers};
@@ -32,6 +33,8 @@ const SENSITIVITY: f64 = 0.0022;
 /// Ölçüm panelindeki sayıların (konum, çizim sayısı…) yenilenme aralığı.
 /// Her karede yenilenseydi arayüz de her karede yeniden çizilirdi.
 const DEBUG_SAMPLE_INTERVAL: f64 = 0.25;
+/// Yaratıcı modda sol tık basılı tutulurken art arda kırma aralığı.
+const CREATIVE_BREAK_INTERVAL: f64 = 0.22;
 
 /// Yüzme (H6): suda yerçekimi yerine yumuşak batma, `Space` ile yukarı çıkış.
 const SWIM_SPEED: f64 = 2.6;
@@ -56,6 +59,14 @@ struct Game {
     perf: Option<Performance>,
     /// Mesh üretiminin yeniden kullanılan tamponları (chunk başına ayırma yok).
     mesh_buf: MeshBuffers,
+
+    /// Sol tık basılı mı? (kazma)
+    mining_held: bool,
+    mining: Mining,
+    creative_break_cd: f64,
+    particles: Particles,
+    /// Parçacık renkleri için doku atlasının pikselleri.
+    atlas_pixels: Vec<u8>,
 
     keys: HashMap<String, bool>,
     mouse: (f64, f64),
@@ -297,9 +308,51 @@ impl Game {
 
         self.world.set_block_raw(hit.x, hit.y, hit.z, crate::blocks::AIR);
         self.remesh_around(hit.x, hit.y, hit.z);
+        self.particles.spawn_break(hit.x, hit.y, hit.z, id, &self.atlas_pixels);
         if !self.survival.is_creative() {
             let msg = format!("+{}", item_name(id as u16));
             self.hud.toast(msg);
+        }
+    }
+
+    /// Sol tık basıldı: kazma başlar. Hayatta kalmada blok, sertliğine göre
+    /// basılı tutuldukça kırılır; yaratıcıda hemen (ve basılı tutulursa
+    /// aralıklarla) kırılır.
+    fn start_mining(&mut self) {
+        self.mining_held = true;
+        self.creative_break_cd = 0.0;
+        if self.target().is_some_and(|h| h.y <= 0) {
+            self.hud.toast("Ana kaya kırılamaz");
+        }
+    }
+
+    fn stop_mining(&mut self) {
+        self.mining_held = false;
+        self.mining.reset();
+    }
+
+    fn update_mining(&mut self, dt: f64) {
+        if !self.mining_held || self.inv_open || self.survival.dead {
+            self.mining.reset();
+            return;
+        }
+        let Some(hit) = self.target().filter(|h| h.y > 0) else {
+            self.mining.reset();
+            return;
+        };
+        if self.survival.is_creative() {
+            self.mining.reset();
+            self.creative_break_cd -= dt;
+            if self.creative_break_cd <= 0.0 {
+                self.creative_break_cd = CREATIVE_BREAK_INTERVAL;
+                self.break_block();
+            }
+            return;
+        }
+        let id = self.world.get_block(hit.x, hit.y, hit.z);
+        if self.mining.advance([hit.x, hit.y, hit.z], id, dt) {
+            self.mining.reset();
+            self.break_block();
         }
     }
 
@@ -481,6 +534,8 @@ impl Game {
 
         self.update_chunks();
         self.update_player(dt);
+        self.update_mining(dt);
+        self.particles.update(dt, &self.world);
         self.update_survival(dt);
         self.drain_events();
         self.hud.tick(dt);
@@ -674,6 +729,7 @@ impl Game {
             reach * 0.55,
             reach - 2.0,
             self.time,
+            &FrameEffects { crack: self.mining.crack(), particles: &self.particles.list },
         );
 
         self.hud.draw(&HudFrame {
@@ -810,13 +866,16 @@ impl Game {
             return;
         }
         if button == 0 {
-            self.break_block();
+            self.start_mining();
         } else if button == 2 {
             self.right_click();
         }
     }
 
     fn on_mouse_up(&mut self, e: &MouseEvent) {
+        if e.button() == 0 {
+            self.stop_mining();
+        }
         if !self.pointer_locked && self.dragging {
             if self.drag_moved < 6.0 {
                 if self.drag_button == 0 {
@@ -828,7 +887,6 @@ impl Game {
             self.dragging = false;
             self.drag_button = -1;
         }
-        let _ = e;
     }
 
     fn on_wheel(&mut self, e: &WheelEvent) {
@@ -845,6 +903,7 @@ impl Game {
             return;
         }
         self.inv_open = true;
+        self.stop_mining();
         self.keys.clear();
         self.dragging = false;
         if self.document.pointer_lock_element().is_some() {
@@ -1022,6 +1081,7 @@ pub fn debug_state_json() -> String {
                 "\"pos\":[{:.2},{:.2},{:.2}],\"yaw\":{:.3},\"pitch\":{:.3},",
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
                 "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
+                "\"mining\":{:.2},\"particles\":{},",
                 "\"slots\":[{}]",
                 "}}"
             ),
@@ -1060,6 +1120,8 @@ pub fn debug_state_json() -> String {
             g.hud.width,
             g.hud.height,
             g.player.feet_in_water(&g.world),
+            g.mining.progress,
+            g.particles.list.len(),
             slots.join(",")
         )
     })
@@ -1125,6 +1187,10 @@ pub fn debug_place_consumed() -> i32 {
 
 pub fn debug_break() {
     with_game(|g| g.break_block());
+}
+
+pub fn debug_hold_break(on: bool) {
+    with_game(|g| if on { g.start_mining() } else { g.stop_mining() });
 }
 
 pub fn debug_right_click() {
@@ -1298,6 +1364,11 @@ pub fn start() -> Result<(), JsValue> {
         last_time: perf.as_ref().map(|p| p.now()).unwrap_or(0.0),
         perf,
         mesh_buf: MeshBuffers::default(),
+        mining_held: false,
+        mining: Mining::default(),
+        creative_break_cd: 0.0,
+        particles: Particles::default(),
+        atlas_pixels: crate::atlas::build_atlas(),
         keys: HashMap::new(),
         mouse: (0.0, 0.0),
         pointer_locked: false,
@@ -1407,6 +1478,7 @@ pub fn start() -> Result<(), JsValue> {
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
             if let Ok(mut game) = g.try_borrow_mut() {
                 game.keys.clear();
+                game.stop_mining();
                 game.dragging = false;
                 game.drag_button = -1;
             }
@@ -1425,6 +1497,7 @@ pub fn start() -> Result<(), JsValue> {
             let mut game = g.borrow_mut();
             game.pointer_locked = locked;
             if !locked {
+                game.stop_mining();
                 game.dragging = false;
                 game.drag_button = -1;
             }
