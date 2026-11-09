@@ -153,16 +153,21 @@ Her adımın başarılı sonucu şöyle görünür:
 
 | Adım | Başarılı çıktı |
 |---|---|
-| 1 | `test result: ok. 118 passed` |
+| 1 | `test result: ok. 131 passed` |
 | 2 | `Finished ... release ... [optimized]` satırı |
 | 3–4 | Çıktı yok; `pkg\` ve `pkg-nomodules\` içinde `.js` + `_bg.wasm` dosyaları oluşur |
-| 5 | `Yazıldı: ...voxelcraft-rs.html (≈433 KB, ...)` |
+| 5 | `Yazıldı: ...voxelcraft-rs.html (≈450 KB, ...)` |
 
 Git Bash kullanıyorsanız bu adımların hepsi tek komuttur:
 
 ```bash
 ./build.sh
 ```
+
+> **İsteğe bağlı:** PATH'te [`wasm-opt`](https://github.com/WebAssembly/binaryen)
+> (binaryen) varsa `./build.sh` çıktıyı ayrıca küçültür: `.wasm` ≈%30, tek
+> dosyalık HTML ≈450 KB → ≈325 KB. Kurulu değilse bu adım atlanır; oyun aynı
+> şekilde çalışır.
 
 ---
 
