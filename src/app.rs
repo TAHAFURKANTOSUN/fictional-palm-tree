@@ -41,6 +41,8 @@ const LATE_FRAME_S: f64 = 0.022;
 const UNLOADS_PER_FRAME: usize = 32;
 /// Yerde hızlanma/yavaşlama katsayısı (1/sn): hız hedefe ≈50 ms'de yaklaşır.
 const GROUND_ACCEL: f64 = 20.0;
+/// Meşale modellerinin çizildiği en uzak mesafe (blok); arabalar iki katı.
+const PROP_DRAW_DIST: f64 = 48.0;
 const SENSITIVITY: f64 = 0.0022;
 /// Ölçüm panelindeki sayıların (konum, çizim sayısı…) yenilenme aralığı.
 /// Her karede yenilenseydi arayüz de her karede yeniden çizilirdi.
@@ -108,6 +110,8 @@ struct Game {
     /// Yakındaki meşalelerin konumları (çizim ve ışık için önbellek).
     torches: Vec<[i32; 3]>,
     torches_dirty: bool,
+    /// Meşale listesinin en son sıralandığı kamera hücresi.
+    torch_sort_cell: Option<[i32; 3]>,
     fishing: Option<Fishing>,
     cars: Vec<Car>,
     /// Sürülen arabanın `cars` içindeki sırası.
@@ -447,6 +451,7 @@ impl Game {
     /// geçilince yenilenir.
     fn refresh_torches(&mut self) {
         self.torches_dirty = false;
+        self.torch_sort_cell = None;
         self.torches.clear();
         let size = CHUNK_SIZE as usize;
         for dz in -4..=4 {
@@ -714,12 +719,22 @@ impl Game {
         }
 
         // Meşaleler: sap + titreyen alev; en yakınları ışık verir.
-        self.torches.sort_by(|a, b| {
-            let d = |t: &[i32; 3]| (t[0] as f64 + 0.5 - cam[0]).powi(2) + (t[1] as f64 - cam[1]).powi(2) + (t[2] as f64 + 0.5 - cam[2]).powi(2);
-            d(a).total_cmp(&d(b))
-        });
+        // Sıralama yalnızca liste değiştiğinde ya da kamera başka bir bloğa
+        // geçtiğinde yenilenir (her karede değil).
+        let cell = [cam[0].floor() as i32, cam[1].floor() as i32, cam[2].floor() as i32];
+        if self.torch_sort_cell != Some(cell) {
+            self.torch_sort_cell = Some(cell);
+            self.torches.sort_by(|a, b| {
+                let d = |t: &[i32; 3]| (t[0] as f64 + 0.5 - cam[0]).powi(2) + (t[1] as f64 - cam[1]).powi(2) + (t[2] as f64 + 0.5 - cam[2]).powi(2);
+                d(a).total_cmp(&d(b))
+            });
+        }
         for t in self.torches.iter() {
             let (x, y, z) = (t[0] as f64 + 0.5, t[1] as f64, t[2] as f64 + 0.5);
+            // Liste yakından uzağa sıralı: menzil dışına çıkınca gerisi de dışarıdadır.
+            if (x - cam[0]).powi(2) + (z - cam[2]).powi(2) > PROP_DRAW_DIST * PROP_DRAW_DIST {
+                break;
+            }
             let flicker = ((self.time * 9.0 + (t[0] * 7 + t[2] * 13) as f32).sin() * 0.5 + 0.5) * 0.25;
             boxes.push(BoxInst { center: [x, y + 0.28, z], half: [0.06, 0.28, 0.06], yaw: 0.0, pitch: 0.0, color: [128, 92, 52], glow: false });
             let s = 0.085 + flicker * 0.05;
@@ -738,6 +753,9 @@ impl Game {
             // Sürülen arabanın kabini çizilmez: göz içinde durur, tavan görüşü kapatırdı.
             let driven = self.driving == Some(i);
             let mut p = car.body.pos;
+            if (p[0] - cam[0]).powi(2) + (p[2] - cam[2]).powi(2) > (PROP_DRAW_DIST * 2.0).powi(2) {
+                continue;
+            }
             let yaw = car.yaw as f32;
             // Süspansiyon: hızla artan hafif zıplama; gaz/frende gövde yatar.
             let pace = (car.speed.abs() / crate::vehicle::MAX_SPEED).min(1.0);
@@ -1937,6 +1955,7 @@ pub fn start() -> Result<(), JsValue> {
         last_frame_dt: 0.0,
         torches: Vec::new(),
         torches_dirty: true,
+        torch_sort_cell: None,
         fishing: None,
         cars: Vec::new(),
         driving: None,

@@ -371,6 +371,8 @@ pub struct Renderer {
     index: HashMap<u64, usize>,
     /// Kareler arasında yeniden kullanılan görünür chunk listesi.
     visible: Vec<Visible>,
+    /// Kutu ve parçacık köşeleri için kareler arasında yeniden kullanılan tampon.
+    scratch: Vec<u8>,
 
     pub fog_color: [f32; 3],
     pub sky_top: [f32; 3],
@@ -626,6 +628,7 @@ impl Renderer {
             chunks: Vec::new(),
             index: HashMap::new(),
             visible: Vec::new(),
+            scratch: Vec::new(),
             fog_color: [0.81, 0.90, 0.98],
             sky_top: [0.35, 0.65, 0.94],
             sky_horizon: [0.81, 0.90, 0.98],
@@ -758,6 +761,8 @@ impl Renderer {
             if fx.underwater { (water_color, 0.0, fog_far.min(28.0)) } else { (self.fog_color, fog_near, fog_far) };
         let clear = if fx.underwater { water_color } else { self.sky_horizon };
 
+        let mut bytes = std::mem::take(&mut self.scratch);
+
         let gl = &self.gl;
         gl.enable(GL::DEPTH_TEST);
         gl.depth_func(GL::LEQUAL);
@@ -778,7 +783,9 @@ impl Renderer {
         gl.uniform1f(self.u_time.as_ref(), time);
         gl.uniform1f(self.u_water.as_ref(), 0.0);
         gl.uniform1f(self.u_light.as_ref(), self.light);
-        let count = fx.lights.len().min(8);
+        // Gündüz ortam ışığı zaten tamdır: meşaleler görüntüyü değiştirmez,
+        // piksel başına ışık döngüsü hiç çalıştırılmaz.
+        let count = if self.light >= 0.98 { 0 } else { fx.lights.len().min(8) };
         let mut lights = [0.0f32; 32];
         for (i, l) in fx.lights.iter().take(count).enumerate() {
             lights[i * 4..i * 4 + 4].copy_from_slice(l);
@@ -850,7 +857,7 @@ impl Renderer {
 
         // 2a) Kutular (meşale, araba, şamandıra): opak, derinliğe yazar.
         if !fx.boxes.is_empty() {
-            let mut bytes: Vec<u8> = Vec::with_capacity(fx.boxes.len() * 36 * BOX_VERTEX_BYTES);
+            bytes.clear();
             for b in fx.boxes {
                 let (sin, cos) = b.yaw.sin_cos();
                 let (ps, pc) = b.pitch.sin_cos();
@@ -896,7 +903,7 @@ impl Renderer {
         // 2b) Kırma efektleri: parçacıklar opak, çatlak kaplaması harmanlı.
         //     Sudan önce çizilirler ki su altındaki blokta suyun arkasında kalsınlar.
         if !fx.particles.is_empty() {
-            let mut bytes: Vec<u8> = Vec::with_capacity(fx.particles.len() * PARTICLE_BYTES);
+            bytes.clear();
             for p in fx.particles {
                 for a in 0..3 {
                     bytes.extend_from_slice(&((p.pos[a] - cam_pos[a]) as f32).to_le_bytes());
@@ -952,5 +959,6 @@ impl Renderer {
         self.stats_draws = draws;
         self.stats_tris = tris;
         self.visible = visible;
+        self.scratch = bytes;
     }
 }
