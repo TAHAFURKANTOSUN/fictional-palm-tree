@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-116%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-197%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -46,9 +46,32 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 - ❤️ **Hayatta kalma modu** — can, açlık, nefes, düşme hasarı ve boğulma.
 - 🕊️ **Yaratıcı mod** — uçuş, sınırsız blok, envanter yedekleme.
 - 🛠️ **3×3 craft sistemi** — konumdan bağımsız şekilli ve şekilsiz tarifler.
-- ⚡ **Yüksek performans** — görüş konisi (frustum) ayıklama, ~120 FPS.
+- ⚡ **Yüksek performans** — 8 baytlık paketlenmiş vertex, ortak indeks tamponu,
+  görüş konisi (frustum) ayıklama, yalnızca değişince çizilen arayüz, ~120 FPS.
+- 🔭 **Uzakta da net** — çizim kameraya göre yapılır; orijinden 1.000.000 blok
+  uzakta bile geometri titremez.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
-- ✅ **116 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- 🔦 **Meşale** — geceyi gerçekten aydınlatır; elde tutarken de ışık verir.
+  Alevi titrer, kıvılcım ve duman çıkarır.
+- 🎣 **Olta ve balık** — suya at, balık vurunca çek; balık yenir (+5 açlık).
+  Kamış savrulur, şamandıra yay çizerek uçar, misina ve su sıçraması çizilir.
+- 🚗 **Araba** — üret, yere bırak, <kbd>R</kbd> ile bin; tek blokluk basamakları çıkar.
+  Tekerlekler döner, öndekiler direksiyonla kırılır; egzoz dumanı ve toz çıkar.
+- 🐑 **Hayvanlar ve yaratıklar** — koyun, domuz, tavuk çimenlerde gezinir
+  (durur, yürür); vurulunca koşarak kaçar ve et bırakır. Gece çıkan zombi
+  oyuncuyu görünce koşarak kovalar. Mantar Kafa mesafesini korur ve zehir
+  tükürür. Canlılar ürer (yavrular büyür) ve ses çıkarır; gece yaratıkları
+  gündüz yanar.
+- 🔫 **Silahlar** — dürbünsüz tabanca ve sağ tıkla yakınlaştıran dürbünlü
+  tüfek; namlu alevi, geri tepme, mermi izi ve isabet kırıntıları. Cam, yaprak
+  ve meşaleyi parçalar.
+- 🌗 **Gündüz–gece döngüsü** — 12 dakikalık gün; gün batımı renkleri, ay ve
+  yıldızlar, saate göre ortam ışığı. Yaprakların arasından gökyüzü görünür.
+- 🌅 **Görsel dokunuşlar** — güneş ve halesi, dalgalanan su parıltısı, su altı
+  sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
+- ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
+  dokusundan renk alan parçacıklar.
+- ✅ **197 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -65,6 +88,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 | [`wasm-bindgen-cli`](https://github.com/rustwasm/wasm-bindgen) | **0.2.129** | `Cargo.lock` içindeki kütüphane sürümüyle **birebir** eşleşmeli |
 | Bash | — | `build.sh` için (Windows'ta Git Bash / WSL) |
 | Node.js | isteğe bağlı | Tek dosya paketleyici ve başsız test için |
+| [`wasm-opt`](https://github.com/WebAssembly/binaryen) | isteğe bağlı | PATH'te varsa `build.sh` çıktıyı ≈%30 küçültür |
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -101,8 +125,11 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 |---|---|
 | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | Hareket |
 | Fare | Etrafa bak |
-| Sol Tık | Blok kır |
-| Sağ Tık | Blok koy / elma ye |
+| Sol Tık (basılı tut) | Blok kır — sertliğe göre süre alır, yaratıcıda anında |
+| Sol Tık (silah elde) | Ateş et |
+| Sol Tık (canlıya bakarken) | Yumruk at |
+| Sağ Tık (tüfek elde, basılı) | Dürbünle yakınlaştır |
+| Sağ Tık | Blok koy / ye / oltayı at-çek / arabayı bırak |
 | <kbd>E</kbd> | Envanter & çalışma tezgahı |
 | <kbd>F</kbd> veya <kbd>Space</kbd> ×2 | Uçuş (yalnızca Yaratıcı mod) |
 | <kbd>G</kbd> | Yaratıcı ↔ Hayatta Kalma |
@@ -111,6 +138,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | <kbd>1</kbd>–<kbd>9</kbd>, fare tekerleği | Yuva seç |
 | <kbd>[</kbd> <kbd>]</kbd> | Görüş mesafesi (3–16 bölge) |
 | <kbd>H</kbd> | Arayüzü gizle |
+| <kbd>R</kbd> | Arabaya bin / in (<kbd>Shift</kbd>+<kbd>R</kbd>: arabayı envantere al) |
 | <kbd>Esc</kbd> | Fareyi bırak |
 
 ## 🌲 Oynanış
@@ -128,7 +156,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 - **Yemek** — yapraklar %14 olasılıkla 🍎 **elma** düşürür; sağ tıkla ye
   (+6 açlık).
 - **Yaratıcı mod** (<kbd>G</kbd>) — can/açlık devre dışı, uçuş açık, envanter
-  13 çeşit bloğun 64'lük paletiyle dolar, koymak hiçbir şey harcamaz. Hayatta
+  20 çeşit blok ve eşyanın 64'lük paletiyle dolar, koymak hiçbir şey harcamaz. Hayatta
   kalmaya dönünce önceki envanterin aynen geri gelir.
 
 ### 🛠️ Craft tarifleri
@@ -143,6 +171,11 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | Kum + Tahta | 2 Cam |
 | 4 Taş (2×2) | 4 Tuğla |
 | Toprak + Yaprak | Çim Bloğu |
+| Çubuk + Kütük | 4 Meşale |
+| 3 Çubuk (çapraz) | Olta |
+| 2 Tahta (üst) + 2 Parke Taşı (alt) | Araba |
+| 2 Parke Taşı (üst) + Çubuk (sağ alt) | Tabanca |
+| 3 Parke Taşı (üst) + Çubuk, Cam (alt orta, sağ) | Dürbünlü Tüfek |
 
 Şekilli tarifler **konumdan bağımsızdır**: malzemeyi ızgaranın neresine
 koyarsan koy, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
@@ -155,7 +188,7 @@ Motor bilerek iki katmana ayrıldı:
 
 | Katman | Modüller | Özellik |
 |---|---|---|
-| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
+| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `protocol`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
 | **Tarayıcı katmanı** | `app`, `gl`, `hud` | Yalnızca `wasm32` hedefinde derlenir (`#[cfg(target_arch = "wasm32")]`) |
 
 Bu ayrım sayesinde oyunun **tüm kuralları** (arazi sürekliliği, mesh üretimi,
@@ -202,6 +235,55 @@ flowchart LR
     survival --> inventory
 ```
 
+### ⚡ Performans tasarımı
+
+- **Paketlenmiş vertex** — her köşe 8 bayttır (chunk-yerel konum, döşeme + uv
+  köşesi, renk). Eski `f32` düzeni köşe başına 44 bayt + yüz başına 6 indeksti;
+  chunk mesh'leri GPU'da ≈6 kat daha az yer tutar.
+- **Ortak indeks tamponu** — her yüz aynı `0,1,2, 0,2,3` desenini kullanır;
+  ambient occlusion köşegeni çevirmek gerektiğinde indeksler değil köşelerin
+  yazım sırası kaydırılır. Chunk başına indeks üretilmez, yüklenmez.
+- **Kameraya göre çizim** — chunk konumu `f64` ile kameradan çıkarılıp
+  gölgelendiriciye ofset olarak verilir. Dünya koordinatları hiçbir zaman
+  `f32`'ye sığdırılmaz, bu yüzden hassasiyet uzaklıkla bozulmaz.
+- **Çerçeveli mesh tamponu** — chunk ve komşuları önce 18×18'lik bir tampona
+  kopyalanır; yüz görünürlüğü ve AO örnekleri sabit indeks farklarıyla okunur.
+  Taranan `y` aralığı arazi yüksekliğinden değil, chunk'ın gerçek içeriğinden
+  (`min_open` / `content_top`) gelir — kazılan kuyular da doğru çizilir.
+- **Çizim sırası** — katı katman önden arkaya, ardından gökyüzü (yalnızca boş
+  kalan piksellerde), en son su arkadan öne.
+- **Arayüz** — Canvas2D arayüzü her karede değil, yalnızca gösterdiği durum
+  değiştiğinde yeniden çizilir (tam çizim ≈2000 Canvas2D çağrısıdır).
+
+- **Kare hızı koruması** — chunk akışı kare başına 2,5 ms ile sınırlıdır
+  (kare geç kalıyorsa 1 ms), boşaltmalar karelere yayılır. FPS yine de 50'nin
+  altında kalırsa 3B tuvalin çözünürlüğü kademeli düşürülür (%85 → %70 → %55);
+  düşürme FPS'i artırmıyorsa geri alınır, yük kalkınca tam çözünürlüğe dönülür.
+
+### 🌐 Ağ protokolü temeli
+
+Oyun tek oyunculudur; `protocol` modülü çok oyunculu için hazırlanmış,
+**soket açmayan** bir kodlama katmanıdır. Tasarım Minecraft: Java Edition
+[protokol dokümantasyonunu](https://minecraft.wiki/w/Minecraft_Wiki:Protocol_documentation)
+izler:
+
+| Dokümantasyondaki kavram | Buradaki karşılığı |
+|---|---|
+| `VarInt` / `VarLong` | `Writer::var_int`, `Reader::var_int` (dokümandaki örnek tabloyla testli) |
+| `Position` (x 26, z 26, y 12 bit) | `Position::pack` / `unpack` |
+| `String`, `Identifier` | uzunluk önekli UTF-8; `ad_alanı:yol` kuralları |
+| Paket çerçeveleme | `frame`, akıştan paket ayıran `Decoder` |
+| Bağlantı durumları | `State` + `Connection`: Handshaking → Status / Login → Configuration → Play |
+| Aynı kimlik, farklı paket | `Packet::decode(durum, yön, kimlik, …)` |
+
+Her blok ve eşyanın kalıcı bir adı vardır (`blocks::item_identifier`):
+`minecraft:stone`, `minecraft:oak_log`, `voxelcraft:car`…
+
+Kapsam dışı: şifreleme, zlib sıkıştırması (sıkıştırılmış paket açıkça hata
+verir), NBT ve Minecraft'ın Play paketleri. Tarayıcı ham TCP açamadığı için
+gerçek Minecraft sunucularına bağlanmak mümkün değildir; bu katman kendi
+sunucumuzla WebSocket üzerinden konuşmak içindir.
+
 ### 📁 Proje yapısı
 
 ```text
@@ -223,6 +305,14 @@ voxelcraft-rs/
 │   ├── inventory.rs      # 36 yuvalı envanter
 │   ├── crafting.rs       # 3×3 şekilli/şekilsiz tarifler
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
+│   ├── effects.rs        # kazma ilerlemesi + kırılma parçacıkları
+│   ├── fishing.rs        # olta: şamandıra, bekleme, balığın vurması
+│   ├── protocol.rs       # ağ protokolü temeli: VarInt, Position, çerçeveleme, durumlar
+│   ├── mobs.rs           # hayvanlar ve zombi: gezinme, kaçma, kovalama
+│   ├── weapons.rs        # silahlar: atış aralığı, geri tepme, dürbün
+│   ├── vehicle.rs        # araba fiziği (gaz, direksiyon, basamak çıkma)
+│   ├── sky.rs            # gündüz–gece döngüsü (renkler, güneş, ışık)
+│   ├── pacing.rs         # uyarlanabilir çözünürlük (kare hızı koruması)
 │   ├── mat4.rs           # 4×4 matrisler + görüş konisi (frustum)
 │   ├── gl.rs             # WebGL2 çizici (gölgelendiriciler, VAO/VBO)
 │   ├── hud.rs            # Canvas2D arayüzü (kalpler, çubuk, envanter ekranı)
@@ -238,7 +328,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 118 test
+cargo test --lib          # 197 test
 ```
 
 <details>
@@ -251,14 +341,19 @@ cargo test --lib          # 118 test
 - Üretimin sırasız ve deterministik olması
 - Oyuncu düzenlemelerinin kalıcılığı
 - ±1.000.000 blok uzakta arazi üretimi
-- Mesh öznitelik dengesi, indeks sınırları, daraltılmış y aralığı, kapsayıcı küre
+- Mesh'in paketlenmiş vertex biçimi, sarım yönü ve her yüzün gerçekten açık
+  bir hücreye bakması
 - Mesh'in chunk'taki **en yüksek bloğu** (ağaç tepeleri) kapsaması
+- **Kazılan kuyuların** duvar ve tabanının mesh'e girmesi (komşu chunk dâhil)
+- Akış planının, mesh'lenecek her chunk'ın 8 komşusunu da istemesi
+- Görüş konisinde kutu (AABB) elemesi ve kameraya göre görünüm matrisi
 - Köşe AO'sunun **çapraz komşu chunk'a** bağlı olması
 - Atlas döşemeleri
 - DDA ışın izleme (normal yönü dâhil)
 - AABB çarpışması ve tünelleme engeli
 - Yığınlama (stacking)
 - Craft eşleştirme (offset, fazla malzeme, zincir üretim)
+- Craft'ta eşya kaybı olmaması (sığmayan sonuç, dolu envanterle otomatik doldurma)
 - Açlık / can / yorgunluk / boğulma / düşme matematiği
 - Mod geçişinde envanterin korunması
 
@@ -281,10 +376,13 @@ oyunu Chrome DevTools Protocol üzerinden sürer:
 - Hayatta kalmaya dönüşte envanterin geri gelmesi
 - Koyma tüketimi ve yemek yeme
 - Hayatta kalma modunda uçuşun engellenmesi
+- Kazmanın ilerleyerek kırması ve parçacık saçması
 - Pencere yeniden boyutlandığında HUD'un ve en-boy oranının güncellenmesi
 - Okyanusta <kbd>Space</kbd> ile yüzeye çıkabilme ve batma hızının sınırlı olması
 - ~120 FPS
-- (50000, −50000) noktasına ışınlanmada bellek sınırının korunması
+- Görüş mesafesindeki **her** chunk'ın mesh'lenmiş olması
+- (50000, −50000) ve (1000000, −1000000) noktalarına ışınlanmada bellek
+  sınırının korunması
 
 </details>
 
@@ -294,6 +392,9 @@ oyunu Chrome DevTools Protocol üzerinden sürer:
 ./build.sh          # wasm + pkg/ üret
 ./tools/smoke.sh    # sunucu + başsız Chrome + test + temizlik (tek adım)
 ```
+
+Test, bir denetim tutmadığında ya da konsola hata düştüğünde **sıfırdan farklı
+çıkış koduyla** biter; sorunlar çıktıdaki `problems` listesinde yazar.
 
 > [!WARNING]
 > **Chrome'u `taskkill /F /IM chrome.exe` ile kapatmayın.** `/IM` görüntü adına

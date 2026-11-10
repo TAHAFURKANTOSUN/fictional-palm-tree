@@ -13,7 +13,7 @@
     -webkit-user-select: none; user-select: none;
   }
   canvas { display: block; }
-  #gl  { position: fixed; inset: 0; z-index: 1; }
+  #gl  { position: fixed; inset: 0; z-index: 1; width: 100%; height: 100%; }
   #hud { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
 
   /* ---------- Kaplamalar ---------- */
@@ -91,7 +91,7 @@
     <div class="grid">
       <div><b>W A S D</b><span>Hareket</span></div>
       <div><b>Fare</b><span>Etrafa bak</span></div>
-      <div><b>Sol Tık</b><span>Blok kır</span></div>
+      <div><b>Sol Tık (basılı)</b><span>Blok kır</span></div>
       <div><b>Sağ Tık</b><span>Blok koy / Elma ye</span></div>
       <div><b>E</b><span>Envanter &amp; Craft</span></div>
       <div><b>F / Space ×2</b><span>Uçuş (Yaratıcı modda)</span></div>
@@ -102,11 +102,87 @@
       <div><b>Ctrl</b><span>Hızlı koş / Hızlı uç</span></div>
       <div><b>[ ve ]</b><span>Görüş mesafesi</span></div>
       <div><b>H</b><span>Arayüzü gizle</span></div>
+      <div><b>R</b><span>Arabaya bin / in</span></div>
       <div><b>ESC</b><span>Fareyi bırak</span></div>
     </div>
     <button id="startBtn">Oyna</button>
   </div>
 </div>
+
+<script>
+  // Ses efektleri: dosya yok, her ses WebAudio ile anında sentezlenir.
+  // Rust tarafı `__sfx(ad, ses düzeyi)` çağırır; ad "koyun_idle" gibi
+  // "<tür>_<olay>" biçimindedir. Ses bağlamı ilk tıklamadan sonra açılır.
+  (function () {
+    let ctx = null;
+    window.__sfxLog = [];
+    function audio() {
+      if (!ctx) {
+        const C = window.AudioContext || window.webkitAudioContext;
+        if (!C) return null;
+        ctx = new C();
+      }
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      return ctx;
+    }
+    // Frekansı f0'dan f1'e kayan tek ton; `vib` titreşim hızı (Hz).
+    function tone(c, type, f0, f1, dur, vol, delay, vib) {
+      const t = c.currentTime + (delay || 0);
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
+      if (vib) {
+        const l = c.createOscillator(), lg = c.createGain();
+        l.frequency.value = vib; lg.gain.value = f0 * 0.07;
+        l.connect(lg); lg.connect(o.frequency); l.start(t); l.stop(t + dur);
+      }
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(c.destination);
+      o.start(t); o.stop(t + dur + 0.03);
+    }
+    // Süzgeçten geçirilmiş gürültü (tıslama, patlama).
+    function noise(c, dur, vol, freq, kind, delay) {
+      const t = c.currentTime + (delay || 0);
+      const n = Math.max(1, Math.floor(c.sampleRate * dur));
+      const buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      const s = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
+      s.buffer = buf; f.type = kind || 'bandpass'; f.frequency.value = freq;
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      s.connect(f); f.connect(g); g.connect(c.destination);
+      s.start(t);
+    }
+    const SOUNDS = {
+      sheep_idle:   (c, v) => tone(c, 'sawtooth', 520, 430, 0.55, v, 0, 9),
+      sheep_hurt:   (c, v) => tone(c, 'sawtooth', 720, 480, 0.3, v, 0, 14),
+      pig_idle:     (c, v) => { tone(c, 'square', 170, 120, 0.13, v); tone(c, 'square', 190, 110, 0.16, v, 0.17); },
+      pig_hurt:     (c, v) => tone(c, 'sawtooth', 620, 300, 0.32, v, 0, 20),
+      chicken_idle: (c, v) => { for (let i = 0; i < 3; i++) tone(c, 'triangle', 900, 1350, 0.06, v, i * 0.11); },
+      chicken_hurt: (c, v) => tone(c, 'triangle', 1500, 800, 0.22, v, 0, 30),
+      zombie_idle:  (c, v) => tone(c, 'sawtooth', 110, 70, 0.9, v, 0, 5),
+      zombie_alert: (c, v) => { tone(c, 'sawtooth', 150, 85, 0.7, v * 1.3, 0, 7); noise(c, 0.5, v * 0.4, 400); },
+      zombie_hurt:  (c, v) => tone(c, 'sawtooth', 170, 80, 0.3, v),
+      shroom_idle:  (c, v) => { tone(c, 'sine', 320, 250, 0.3, v); tone(c, 'sine', 250, 330, 0.25, v, 0.3); },
+      shroom_spit:  (c, v) => { noise(c, 0.28, v, 2600); tone(c, 'sine', 700, 200, 0.2, v * 0.6); },
+      shroom_hurt:  (c, v) => tone(c, 'sine', 520, 240, 0.25, v),
+      born:         (c, v) => { tone(c, 'sine', 620, 930, 0.16, v); tone(c, 'sine', 830, 1240, 0.2, v, 0.14); },
+      poison:       (c, v) => { noise(c, 0.4, v, 900); tone(c, 'sine', 300, 120, 0.4, v); },
+      shot:         (c, v) => { noise(c, 0.14, v * 1.6, 1400, 'lowpass'); tone(c, 'square', 190, 55, 0.11, v); },
+    };
+    window.__sfx = function (name, volume) {
+      window.__sfxLog.push(name);
+      if (window.__sfxLog.length > 200) window.__sfxLog.shift();
+      try {
+        const c = audio(), play = SOUNDS[name];
+        if (c && play && volume > 0) play(c, Math.min(volume, 1) * 0.22);
+      } catch (e) { /* ses yoksa oyun sessiz sürer */ }
+    };
+  })();
+</script>
 
 <script type="module">
   import init, * as wasm from './pkg/voxelcraft_rs.js';

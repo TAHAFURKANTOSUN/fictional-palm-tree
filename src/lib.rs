@@ -4,21 +4,29 @@
 //!
 //! Motor bilerek ikiye ayrılmıştır:
 //!
-//! * **Saf çekirdek** (`world`, `noise`, `mesh`, `atlas`, `raycast`, `player`,
-//!   `inventory`, `crafting`, `survival`) — hiçbir tarayıcı API'si kullanmaz.
-//!   `cargo test` ile tarayıcı olmadan doğrulanabilir.
-//! * **Tarayıcı katmanı** (`app`, `gl`, `hud`, `mat4`) — yalnızca
-//!   `wasm32` hedefinde derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
+//! * **Saf çekirdek** (`blocks`, `world`, `noise`, `mesh`, `atlas`, `raycast`,
+//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `protocol`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
+//!   API'si kullanmaz. `cargo test` ile tarayıcı olmadan doğrulanabilir.
+//! * **Tarayıcı katmanı** (`app`, `gl`, `hud`) — yalnızca `wasm32` hedefinde
+//!   derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
 
 pub mod atlas;
 pub mod blocks;
 pub mod crafting;
+pub mod effects;
+pub mod fishing;
 pub mod inventory;
 pub mod mat4;
 pub mod mesh;
+pub mod mobs;
 pub mod noise;
+pub mod pacing;
 pub mod player;
+pub mod protocol;
 pub mod raycast;
+pub mod sky;
+pub mod vehicle;
+pub mod weapons;
 pub mod survival;
 pub mod world;
 
@@ -73,10 +81,24 @@ pub fn debug_set_look(yaw: f64, pitch: f64) {
     app::debug_set_look(yaw, pitch)
 }
 
+/// Günün saatini ayarlar (0 = gün doğumu, 0.35 = öğle, 0.7 = gün batımı).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_set_time(t: f64) {
+    app::debug_set_time(t)
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn debug_break() {
     app::debug_break()
+}
+
+/// Sol tıkı basılı tutar / bırakır (kazma animasyonu testleri).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_hold_break(on: bool) {
+    app::debug_hold_break(on)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -132,6 +154,34 @@ pub fn debug_teleport_to_water() -> bool {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn debug_add_item(id: u16, n: u32) {
     app::debug_add_item(id, n)
+}
+
+/// Oyuncunun 4 blok önüne bir canlı koyar: 0 koyun, 1 domuz, 2 tavuk, 3 zombi,
+/// 4 mantar kafa.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_spawn_mob(kind: u8) {
+    app::debug_spawn_mob(kind)
+}
+
+/// Tüm canlıları ve uçan tükürükleri kaldırır.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_clear_mobs() {
+    app::debug_clear_mobs()
+}
+
+/// Dürbünlü tüfekte nişan almayı (sağ tık basılı) açar / kapatır.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_set_aim(on: bool) {
+    app::debug_set_aim(on)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_set_slot(slot: usize, id: u16, n: u8) {
+    app::debug_set_slot(slot, id, n)
 }
 
 #[cfg(target_arch = "wasm32")]

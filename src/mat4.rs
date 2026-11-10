@@ -49,13 +49,21 @@ pub fn rot_y(a: f32) -> Mat4 {
     [c, 0.0, -s, 0.0, 0.0, 1.0, 0.0, 0.0, s, 0.0, c, 0.0, 0.0, 0.0, 0.0, 1.0]
 }
 
-/// Kamera görünüm matrisi: `R_x(-pitch) * R_y(-yaw) * T(-pos)`.
+/// Görünüm matrisinin yalnızca dönüş kısmı: `R_x(-pitch) * R_y(-yaw)`.
+///
+/// Çizici **kameraya göre** çalışır: her chunk'ın konumu kameradan çıkarılıp
+/// (`f64` ile) gölgelendiriciye ofset olarak verilir, böylece matriste öteleme
+/// kalmaz ve orijinden çok uzakta `f32` hassasiyeti kaybolmaz.
 ///
 /// `YXZ` Euler sırasının tersidir; bakış yönü `player::Player::look_dir` ile
 /// tutarlıdır.
+pub fn view_rotation(yaw: f32, pitch: f32) -> Mat4 {
+    mul(&rot_x(-pitch), &rot_y(-yaw))
+}
+
+/// Tam kamera görünüm matrisi: `R_x(-pitch) * R_y(-yaw) * T(-pos)`.
 pub fn view(yaw: f32, pitch: f32, pos: [f32; 3]) -> Mat4 {
-    let t = translate(-pos[0], -pos[1], -pos[2]);
-    mul(&mul(&rot_x(-pitch), &rot_y(-yaw)), &t)
+    mul(&view_rotation(yaw, pitch), &translate(-pos[0], -pos[1], -pos[2]))
 }
 
 /// Görüş konisi — Gribb–Hartmann yöntemiyle düzlem çıkarımı.
@@ -92,6 +100,23 @@ impl Frustum {
         for p in self.planes.iter() {
             let d = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
             if d < -radius {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Eksenlere hizalı kutu koninin içinde (veya kesişiyor) mu?
+    ///
+    /// Her düzlem için kutunun o düzlemin normali yönündeki en uç köşesine
+    /// bakılır; o bile dışarıdaysa kutu tümüyle dışarıdadır. Chunk gibi ince
+    /// uzun hacimlerde kapsayıcı küreden belirgin biçimde sıkıdır.
+    pub fn aabb_visible(&self, min: [f32; 3], max: [f32; 3]) -> bool {
+        for p in self.planes.iter() {
+            let x = if p[0] >= 0.0 { max[0] } else { min[0] };
+            let y = if p[1] >= 0.0 { max[1] } else { min[1] };
+            let z = if p[2] >= 0.0 { max[2] } else { min[2] };
+            if p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0 {
                 return false;
             }
         }
@@ -159,6 +184,58 @@ mod tests {
             }
         }
         assert!(visible, "büyük küre kenardan görünmeliydi");
+    }
+
+    #[test]
+    fn view_is_rotation_after_translation() {
+        // Kameraya göre çizim: T(-pos) uygulanmış bir nokta, yalnızca dönüş
+        // matrisiyle tam görünüm matrisinin verdiği yere gitmeli.
+        let (yaw, pitch, pos) = (0.7, -0.3, [10.0, 20.0, 30.0]);
+        let full = view(yaw, pitch, pos);
+        let rot = view_rotation(yaw, pitch);
+        let p = [13.0f32, 18.5, 41.0];
+        let rel = [p[0] - pos[0], p[1] - pos[1], p[2] - pos[2]];
+        for r in 0..3 {
+            let a = full[r] * p[0] + full[4 + r] * p[1] + full[8 + r] * p[2] + full[12 + r];
+            let b = rot[r] * rel[0] + rot[4 + r] * rel[1] + rot[8 + r] * rel[2];
+            assert!((a - b).abs() < 1e-4, "eksen {r}: {a} != {b}");
+        }
+        assert!(rot[12..15].iter().all(|v| *v == 0.0), "dönüş matrisinde öteleme olmamalı");
+    }
+
+    #[test]
+    fn frustum_culls_boxes_like_it_culls_points() {
+        let vp = mul(&perspective(1.2, 1.6, 0.1, 200.0), &view_rotation(0.0, 0.0));
+        let f = Frustum::from_view_proj(&vp);
+        let cube = |c: [f32; 3], h: f32| ([c[0] - h, c[1] - h, c[2] - h], [c[0] + h, c[1] + h, c[2] + h]);
+
+        // Kamera -Z yönüne bakar.
+        let (min, max) = cube([0.0, 0.0, -10.0], 1.0);
+        assert!(f.aabb_visible(min, max), "öndeki kutu görünmeli");
+        let (min, max) = cube([0.0, 0.0, 10.0], 1.0);
+        assert!(!f.aabb_visible(min, max), "arkadaki kutu elenmeli");
+        let (min, max) = cube([500.0, 0.0, -10.0], 1.0);
+        assert!(!f.aabb_visible(min, max), "çok yandaki kutu elenmeli");
+        let (min, max) = cube([0.0, 0.0, -400.0], 1.0);
+        assert!(!f.aabb_visible(min, max), "uzak düzlemin ötesindeki kutu elenmeli");
+
+        // Merkezi dışarıda ama bir köşesi görüşe giren kutu elenmemeli.
+        assert!(f.aabb_visible([-80.0, -1.0, -30.0], [-10.0, 1.0, -20.0]));
+        // Kamerayı içine alan kutu her zaman görünür.
+        assert!(f.aabb_visible([-8.0, -40.0, -8.0], [8.0, 40.0, 8.0]));
+    }
+
+    /// Chunk gibi yüksek ama dar bir hacimde kutu, küreden daha sıkı eler.
+    #[test]
+    fn box_test_is_tighter_than_the_bounding_sphere() {
+        let vp = mul(&perspective(1.2, 1.6, 0.1, 400.0), &view_rotation(0.0, 0.0));
+        let f = Frustum::from_view_proj(&vp);
+        // 16×48×16'lık sütun, görüşün hemen sağında.
+        let (min, max) = ([60.0f32, -24.0, -40.0], [76.0f32, 24.0, -24.0]);
+        let center = [68.0, 0.0, -32.0];
+        let radius = (8.0f32 * 8.0 + 24.0 * 24.0 + 8.0 * 8.0).sqrt();
+        assert!(f.sphere_visible(center, radius), "kapsayıcı küre koniye değiyor");
+        assert!(!f.aabb_visible(min, max), "kutu ise tümüyle dışarıda");
     }
 
     #[test]

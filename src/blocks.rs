@@ -18,10 +18,19 @@ pub const GLASS: u8 = 10;
 pub const WATER: u8 = 11;
 pub const BEDROCK: u8 = 12;
 pub const CRAFT_TABLE: u8 = 13;
+/// Meşale: chunk verisinde durur ama küp olarak çizilmez (küçük bir model
+/// olarak ayrıca çizilir), içinden geçilir ve çevresini aydınlatır.
+pub const TORCH: u8 = 14;
 
 /// Yalnızca eşya olan kimlikler (blok değildir).
 pub const STICK: u16 = 100;
 pub const APPLE: u16 = 101;
+pub const FISHING_ROD: u16 = 102;
+pub const FISH: u16 = 103;
+pub const CAR: u16 = 104;
+pub const PISTOL: u16 = 105;
+pub const SNIPER: u16 = 106;
+pub const MEAT: u16 = 107;
 
 /// Doku atlasındaki döşeme indeksleri.
 pub const T_GRASS_TOP: u8 = 0;
@@ -39,6 +48,8 @@ pub const T_GLASS: u8 = 11;
 pub const T_WATER: u8 = 12;
 pub const T_CRAFT_TOP: u8 = 13;
 pub const T_CRAFT_SIDE: u8 = 14;
+/// Yalnızca envanter ikonu olarak kullanılır.
+pub const T_TORCH: u8 = 15;
 
 /// Bir bloğun görsel ve fiziksel özellikleri.
 #[derive(Clone, Copy)]
@@ -76,7 +87,11 @@ const fn liquid_def(
     BlockDef { name, top, bottom, side, transparent: true, liquid: true, tint, vary: false }
 }
 
-static BLOCK_DEFS: [BlockDef; 14] = [
+const BLOCK_COUNT: usize = 15;
+
+static BLOCK_DEFS: [BlockDef; BLOCK_COUNT] = BLOCK_TABLE;
+
+const BLOCK_TABLE: [BlockDef; BLOCK_COUNT] = [
     def("Hava", T_GRASS_TOP, T_DIRT, T_GRASS_SIDE, true, [1.0, 1.0, 1.0], false),
     def("Çim Bloğu", T_GRASS_TOP, T_DIRT, T_GRASS_SIDE, false, [1.0, 1.0, 1.0], true),
     def("Toprak", T_DIRT, T_DIRT, T_DIRT, false, [1.0, 1.0, 1.0], false),
@@ -84,13 +99,15 @@ static BLOCK_DEFS: [BlockDef; 14] = [
     def("Parke Taşı", T_COBBLE, T_COBBLE, T_COBBLE, false, [1.0, 1.0, 1.0], false),
     def("Kum", T_SAND, T_SAND, T_SAND, false, [1.0, 1.0, 1.0], false),
     def("Kütük", T_LOG_TOP, T_LOG_TOP, T_LOG_SIDE, false, [1.0, 1.0, 1.0], false),
-    def("Yaprak", T_LEAVES, T_LEAVES, T_LEAVES, false, [1.0, 1.0, 1.0], true),
+    // Yaprak dokusunda delikler vardır: arkası görünür, komşu yüzleri gizlemez.
+    def("Yaprak", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], true),
     def("Tahta", T_PLANKS, T_PLANKS, T_PLANKS, false, [1.0, 1.0, 1.0], false),
     def("Tuğla", T_BRICK, T_BRICK, T_BRICK, false, [1.0, 1.0, 1.0], false),
     def("Cam", T_GLASS, T_GLASS, T_GLASS, true, [1.0, 1.0, 1.0], false),
     liquid_def("Su", T_WATER, T_WATER, T_WATER, [1.0, 1.0, 1.0]),
     def("Ana Kaya", T_STONE, T_STONE, T_STONE, false, [0.42, 0.42, 0.45], false),
     def("Çalışma Tezgahı", T_CRAFT_TOP, T_PLANKS, T_CRAFT_SIDE, false, [1.0, 1.0, 1.0], false),
+    def("Meşale", T_TORCH, T_TORCH, T_TORCH, true, [1.0, 1.0, 1.0], false),
 ];
 
 /// Blok tanımını döndürür; geçersiz kimlikte `Hava` tanımı verilir.
@@ -102,10 +119,37 @@ pub fn block_def(id: u8) -> &'static BlockDef {
     }
 }
 
+/// `OPAQUE[id]`: blok komşu yüzleri tamamen gizliyor mu? Derleme zamanında
+/// `BLOCK_TABLE`'dan üretilir; tanımsız kimlikler (ve hava) opak değildir.
+static OPAQUE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut id = 1; // 0 = hava
+    while id < BLOCK_COUNT {
+        table[id] = !BLOCK_TABLE[id].transparent;
+        id += 1;
+    }
+    table
+};
+
+/// Komşusunun yüzünü tamamen gizleyen (opak) blok mu?
+///
+/// Mesh üretiminin en sıcak sorgusudur (yüz görünürlüğü + köşe başına üç
+/// ambient occlusion örneği), bu yüzden dallanmasız bir tablodan okunur.
+#[inline]
+pub fn is_opaque(id: u8) -> bool {
+    OPAQUE[id as usize]
+}
+
 /// Su ve hava dışındaki her blok katıdır (oyuncu çarpışması için).
 #[inline]
 pub fn is_solid(id: u8) -> bool {
-    id != AIR && !block_def(id).liquid
+    id != AIR && id != TORCH && !block_def(id).liquid
+}
+
+/// Chunk mesh'ine küp olarak giren blok mu? (Meşale ayrı bir modelle çizilir.)
+#[inline]
+pub fn is_cube(id: u8) -> bool {
+    id != AIR && id != TORCH
 }
 
 #[inline]
@@ -120,6 +164,12 @@ pub enum Icon {
     Tile(u8),
     Cubuk,
     Elma,
+    Olta,
+    Balik,
+    Araba,
+    Tabanca,
+    Tufek,
+    Et,
 }
 
 /// Eşya tanımı (bloklar ve yalnızca eşya olanlar için ortak).
@@ -135,16 +185,60 @@ pub struct ItemDef {
 
 /// Kimliğe göre eşya tanımı.
 pub fn item_def(id: u16) -> Option<ItemDef> {
-    if id <= CRAFT_TABLE as u16 {
+    if (id as usize) < BLOCK_COUNT {
         let b = block_def(id as u8);
         Some(ItemDef { name: b.name, icon: Icon::Tile(b.side), placeable: Some(id as u8), food: 0 })
     } else {
         match id {
             STICK => Some(ItemDef { name: "Çubuk", icon: Icon::Cubuk, placeable: None, food: 0 }),
             APPLE => Some(ItemDef { name: "Elma", icon: Icon::Elma, placeable: None, food: 6 }),
+            FISHING_ROD => Some(ItemDef { name: "Olta", icon: Icon::Olta, placeable: None, food: 0 }),
+            FISH => Some(ItemDef { name: "Balık", icon: Icon::Balik, placeable: None, food: 5 }),
+            CAR => Some(ItemDef { name: "Araba", icon: Icon::Araba, placeable: None, food: 0 }),
+            MEAT => Some(ItemDef { name: "Et", icon: Icon::Et, placeable: None, food: 8 }),
+            PISTOL => Some(ItemDef { name: "Tabanca", icon: Icon::Tabanca, placeable: None, food: 0 }),
+            SNIPER => Some(ItemDef { name: "Dürbünlü Tüfek", icon: Icon::Tufek, placeable: None, food: 0 }),
             _ => None,
         }
     }
+}
+
+/// Eşyanın `ad_alanı:yol` biçimindeki kalıcı kimliği (ağ protokolü ve kayıt
+/// için). Minecraft'ta karşılığı olanlar onun adını taşır; bu oyuna özel
+/// olanlar `voxelcraft` ad alanındadır. Sayısal kimlikler sürümden sürüme
+/// kayabilir, bu adlar kaymaz.
+pub fn item_identifier(id: u16) -> Option<&'static str> {
+    Some(match id {
+        0 => "minecraft:air",
+        1 => "minecraft:grass_block",
+        2 => "minecraft:dirt",
+        3 => "minecraft:stone",
+        4 => "minecraft:cobblestone",
+        5 => "minecraft:sand",
+        6 => "minecraft:oak_log",
+        7 => "minecraft:oak_leaves",
+        8 => "minecraft:oak_planks",
+        9 => "minecraft:bricks",
+        10 => "minecraft:glass",
+        11 => "minecraft:water",
+        12 => "minecraft:bedrock",
+        13 => "minecraft:crafting_table",
+        14 => "minecraft:torch",
+        STICK => "minecraft:stick",
+        APPLE => "minecraft:apple",
+        FISHING_ROD => "minecraft:fishing_rod",
+        FISH => "minecraft:cod",
+        CAR => "voxelcraft:car",
+        PISTOL => "voxelcraft:pistol",
+        SNIPER => "voxelcraft:scoped_rifle",
+        MEAT => "voxelcraft:meat",
+        _ => return None,
+    })
+}
+
+/// [`item_identifier`]'ın tersi.
+pub fn item_from_identifier(name: &str) -> Option<u16> {
+    (0..=MEAT).find(|&id| item_identifier(id) == Some(name))
 }
 
 /// Kullanıcıya gösterilen eşya adı.
@@ -171,6 +265,22 @@ mod tests {
     }
 
     #[test]
+    fn opacity_table_matches_the_block_definitions() {
+        assert!(!is_opaque(AIR), "hava opak olamaz");
+        for id in 1..=CRAFT_TABLE {
+            assert_eq!(
+                is_opaque(id),
+                !block_def(id).transparent,
+                "blok {id} için opaklık tablosu tanımla uyuşmuyor"
+            );
+        }
+        assert!(!is_opaque(WATER) && !is_opaque(GLASS));
+        assert!(!is_opaque(LEAVES), "yaprak delikli: arkasındaki yüzler çizilmeli");
+        // Tanımsız kimlikler hava gibi davranır.
+        assert!(!is_opaque(200));
+    }
+
+    #[test]
     fn block_defs_cover_every_block_id() {
         for id in 0..=CRAFT_TABLE {
             assert!(!block_def(id).name.is_empty(), "blok {id} tanımsız");
@@ -190,6 +300,43 @@ mod tests {
         assert_eq!(item_def(APPLE).unwrap().placeable, None);
         assert_eq!(item_def(APPLE).unwrap().food, 6);
         assert_eq!(item_name(APPLE), "Elma");
+    }
+
+    #[test]
+    fn torch_is_a_walk_through_block_that_is_not_meshed() {
+        assert!(!is_solid(TORCH), "meşalenin içinden geçilebilmeli");
+        assert!(!is_opaque(TORCH) && !is_cube(TORCH));
+        assert!(is_cube(STONE) && !is_cube(AIR));
+        assert_eq!(item_def(TORCH as u16).unwrap().placeable, Some(TORCH));
+        assert_eq!(item_name(TORCH as u16), "Meşale");
+    }
+
+    #[test]
+    fn fish_is_food_and_tools_are_not_placeable() {
+        assert_eq!(item_def(FISH).unwrap().food, 5);
+        for id in [FISHING_ROD, FISH, CAR] {
+            assert_eq!(item_def(id).unwrap().placeable, None);
+        }
+    }
+
+    /// Her eşyanın geçerli, benzersiz ve geri çevrilebilir bir kimliği olmalı.
+    #[test]
+    fn every_item_has_a_unique_valid_identifier() {
+        let mut seen = std::collections::HashSet::new();
+        let mut count = 0;
+        for id in 0..=MEAT {
+            let Some(def) = item_def(id) else {
+                assert!(item_identifier(id).is_none(), "tanımsız eşya {id} için kimlik var");
+                continue;
+            };
+            let name = item_identifier(id).unwrap_or_else(|| panic!("{} için kimlik yok", def.name));
+            assert!(crate::protocol::Identifier::parse(name).is_ok(), "geçersiz kimlik: {name}");
+            assert!(seen.insert(name), "yinelenen kimlik: {name}");
+            assert_eq!(item_from_identifier(name), Some(id));
+            count += 1;
+        }
+        assert_eq!(count, 23);
+        assert_eq!(item_from_identifier("minecraft:diamond"), None);
     }
 
     #[test]

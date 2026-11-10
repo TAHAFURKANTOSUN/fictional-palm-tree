@@ -2,7 +2,7 @@
 
 use crate::blocks::{
     item_def, APPLE, BRICK, COBBLE, CRAFT_TABLE, DIRT, GLASS, GRASS, LEAVES, LOG, PLANKS, SAND,
-    STONE, WATER,
+    STONE, TORCH, WATER,
 };
 
 pub const INV_SIZE: usize = 36;
@@ -142,6 +142,7 @@ impl Inventory {
             (LEAVES as u16, 8),
             (APPLE, 3), // kısayolun 9. yuvası — hemen yiyebilmek için
             (GLASS as u16, 6),
+            (TORCH as u16, 4),
         ] {
             self.add(id, n);
         }
@@ -150,10 +151,12 @@ impl Inventory {
     /// Yaratıcı mod paleti: her bloktan tam yığın.
     pub fn give_creative_palette(&mut self) {
         self.slots = [None; INV_SIZE];
-        let palette: [u16; 13] = [
+        let palette: [u16; 20] = [
             GRASS as u16, DIRT as u16, STONE as u16, COBBLE as u16, SAND as u16,
             LOG as u16, LEAVES as u16, PLANKS as u16, BRICK as u16, GLASS as u16,
             CRAFT_TABLE as u16, WATER as u16, APPLE,
+            TORCH as u16, crate::blocks::FISHING_ROD, crate::blocks::FISH, crate::blocks::CAR,
+            crate::blocks::PISTOL, crate::blocks::SNIPER, crate::blocks::MEAT,
         ];
         for (i, id) in palette.iter().enumerate() {
             self.slots[i] = Some(Stack::new(*id, MAX_STACK));
@@ -272,7 +275,7 @@ mod tests {
         let mut inv = Inventory::new();
         inv.give_creative_palette();
         assert_eq!(inv.slots[0], Some(Stack::new(GRASS as u16, 64)));
-        assert_eq!(inv.slots.iter().flatten().count(), 13);
+        assert_eq!(inv.slots.iter().flatten().count(), 20);
         for s in inv.slots.iter().flatten() {
             assert_eq!(s.count, MAX_STACK);
         }

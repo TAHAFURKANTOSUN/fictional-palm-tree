@@ -24,6 +24,9 @@
 //
 // Ortam değişkenleriyle özelleştirilebilir:
 //   CDP_PORT (varsayılan 9334), TARGET_URL (varsayılan http://127.0.0.1:8799/index.html)
+//
+// Çıkış kodu: tüm denetimler geçtiyse 0; bir denetim başarısızsa ya da konsola
+// hata düştüyse 1 (ayrıntılar çıktıdaki `problems` listesindedir).
 
 import fs from 'fs';
 
@@ -112,6 +115,28 @@ async function main() {
   const out = {};
   out.boot = boot;
 
+  // Beklenti tutmazsa `problems` listesine yazar; test sonunda çıkış kodu
+  // buna göre belirlenir.
+  const expect = (name, ok, detail) => {
+    if (!ok) problems.push(`BEKLENTİ: ${name}` + (detail === undefined ? '' : ` — ${JSON.stringify(detail)}`));
+  };
+  const state = async () => JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
+  // Chunk akışı yetişene kadar bekler (yavaş makinelerde sabit bekleme yetmeyebilir).
+  const waitForStreaming = async (ms = 20000) => {
+    let s = await state();
+    for (let waited = 0; s.meshPending > 0 && waited < ms; waited += 250) {
+      await sleep(250);
+      s = await state();
+    }
+    return s;
+  };
+
+  // Görüş mesafesindeki her chunk mesh'lenmiş olmalı. (Eskiden dairenin
+  // kenarındaki chunk'ların çapraz komşuları üretilmediği için bunlar hiç
+  // çizilemiyordu.)
+  expect('açılışta görüş mesafesindeki tüm chunk\'lar mesh\'lendi', boot.meshPending === 0,
+    { wantMesh: boot.wantMesh, meshPending: boot.meshPending });
+
   // ---- 1) Oyna düğmesine bas (başlat) ----
   await evalJs(`document.getElementById('startBtn').click()`);
   await sleep(600);
@@ -120,32 +145,45 @@ async function main() {
   // ---- 2) Başlangıç kiti ----
   out.starterGrass = await evalJs(`window.__vcRs.debug_count(1)`);
   out.starterApple = await evalJs(`window.__vcRs.debug_count(101)`);
+  expect('başlangıç kiti: 16 çim, 3 elma', out.starterGrass === 16 && out.starterApple === 3,
+    [out.starterGrass, out.starterApple]);
 
   // ---- 3) Hasar ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_damage(6); 1`);
   out.afterDamage = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health;
+  expect('6 hasar: can 20 → 14', out.afterDamage === 14, out.afterDamage);
 
   // ---- 4) Yıldız açlığı: 20 sn simülasyon ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_hunger(0); window.__vcRs.debug_sim(20); 1`);
   out.starvedHealth = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health;
+  expect('20 sn yıldız açlığı: can 20 → 15', out.starvedHealth === 15, out.starvedHealth);
 
   // ---- 5) Tokken iyileşme ----
   await evalJs(`window.__vcRs.debug_set_health(8); window.__vcRs.debug_set_hunger(20); window.__vcRs.debug_sim(20); 1`);
   out.regenHealth = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health;
+  expect('tokken iyileşme: can 8\'den artar, 12\'yi geçmez', out.regenHealth > 8 && out.regenHealth <= 12,
+    out.regenHealth);
 
-  // ---- 6) Yaratıcı mod: hasar yok, 13 yuva x64, uçuş açık ----
+  // ---- 6) Yaratıcı mod: hasar yok, 20 yuva x64, uçuş açık ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_mode(true); 1`);
   await sleep(200);
   let st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.creative = { mode: st.mode, flying: st.flying, slots: st.slots.filter(s => s).length, first: st.slots[0] };
   await evalJs(`window.__vcRs.debug_damage(10); 1`);
   out.creativeDamageIgnored = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health === 20;
+  expect('yaratıcı mod: uçuş açık, 20 yuva × 64',
+    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 20 &&
+      out.creative.first?.[0] === 1 && out.creative.first?.[1] === 64, out.creative);
+  expect('yaratıcı modda hasar yok', out.creativeDamageIgnored);
 
   // ---- 7) Hayatta kalmaya dönüş: envanter geri gelir ----
   await evalJs(`window.__vcRs.debug_set_mode(false); 1`);
   await sleep(200);
   st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.backToSurvival = { mode: st.mode, flying: st.flying, grass: st.slots[0] };
+  expect('hayatta kalmaya dönüş: uçuş kapalı, envanter geri geldi',
+    st.mode === 'Hayatta Kalma' && st.flying === false && st.slots[0]?.[0] === 1 && st.slots[0]?.[1] === 16,
+    out.backToSurvival);
 
   // ---- 8) Blok kır / koy (aşağı bak) ----
   await evalJs(`window.__vcRs.debug_set_look(0, -1.5); 1`);
@@ -158,6 +196,7 @@ async function main() {
   const afterPlace = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.creativePlaceNoConsume = creativeConsumed === 0 &&
     before.slots[0][1] === afterPlace.slots[0][1];
+  expect('yaratıcı modda koymak blok harcamaz', out.creativePlaceNoConsume);
 
   await evalJs(`window.__vcRs.debug_break(); 1`);
   await sleep(100);
@@ -180,9 +219,148 @@ async function main() {
   await evalJs(`window.__vcRs.debug_right_click(); 1`);
   const afterEat = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.eat = { before: appleBefore, after: afterEat.slots[8], hunger: afterEat.hunger };
+  expect('elma: açlık 6 → 12, bir elma eksilir',
+    afterEat.hunger === 12 && appleBefore?.[0] === 101 && afterEat.slots[8]?.[1] === appleBefore[1] - 1, out.eat);
 
   // ---- 11) Uçuş hayatta kalmada engelli ----
   out.flyBlocked = afterEat.flying === false;
+  expect('hayatta kalmada uçuş kapalı', out.flyBlocked);
+
+  // ---- 11b) Kazma animasyonu: basılı tutunca ilerleme, kırılınca parçacık ----
+  {
+    await evalJs(`window.__vcRs.debug_set_look(2.4, -0.55); window.__vcRs.debug_hold_break(true); 1`);
+    let progressed = false, burst = false;
+    for (let i = 0; i < 400 && !burst; i++) {
+      const s = await state();
+      progressed ||= s.mining > 0 && s.mining < 1;
+      burst = s.particles > 0;
+      await sleep(25);
+    }
+    await evalJs(`window.__vcRs.debug_hold_break(false); 1`);
+    await sleep(200);
+    const s = await state();
+    out.mining = { progressed, burst, afterRelease: s.mining };
+    expect('kazma: blok anında değil, ilerleyerek kırılır', progressed);
+    expect('kazma: kırılınca parçacık saçılır', burst);
+    expect('kazma: tık bırakılınca ilerleme sıfırlanır', s.mining === 0, s.mining);
+  }
+
+  // ---- 11c) Meşale, araba, olta ----
+  {
+    const v = 'window.__vcRs';
+    // Meşale: elde tutunca ışık verir; yere konunca listeye girer ve bir adet eksilir.
+    await evalJs(`${v}.debug_set_slot(0, 14, 8); ${v}.debug_set_slot(2, 104, 1); ${v}.debug_select(0); ${v}.debug_set_look(1.3, -0.4); 1`);
+    await sleep(400);
+    const held = await state();
+    for (let i = 0; i < 12 && (await state()).torches === 0; i++) {
+      await evalJs(`${v}.debug_set_look(${1.3 + i * 0.52}, -0.4); 1`);
+      await sleep(250);
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(250);
+    }
+    const placed = await state();
+    out.torch = { heldLights: held.lights, torches: placed.torches, left: placed.slots[0] };
+    expect('meşale: elde ışık verir', held.lights >= 1, out.torch);
+    expect('meşale: konunca dünyaya eklenir ve harcanır', placed.torches === 1 && placed.slots[0]?.[1] === 7, out.torch);
+
+    // Araba: yere bırak, R ile bin, W ile sür, R ile in.
+    // Arazi rastgele: arabanın sığdığı bir yön bulunana kadar çevreye bakılır.
+    let carYaw = 3.4;
+    await evalJs(`${v}.debug_select(2); 1`);
+    for (let i = 0; i < 12 && (await state()).cars === 0; i++) {
+      carYaw = 3.4 + i * 0.52;
+      await evalJs(`${v}.debug_set_look(${carYaw}, -0.45); 1`);
+      await sleep(250);
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(250);
+    }
+    const key = (code, type) => evalJs(`window.dispatchEvent(new KeyboardEvent('${type}', { code: '${code}', bubbles: true })); 1`);
+    await key('KeyR', 'keydown'); await key('KeyR', 'keyup');
+    await sleep(300);
+    const mounted = await state();
+    await evalJs(`${v}.debug_set_look(${carYaw}, -0.1); 1`);
+    await key('KeyW', 'keydown');
+    await sleep(2500);
+    await key('KeyW', 'keyup');
+    const drove = await state();
+    await sleep(1500);
+    await key('KeyR', 'keydown'); await key('KeyR', 'keyup');
+    await sleep(300);
+    const off = await state();
+    const dist = Math.hypot(drove.pos[0] - mounted.pos[0], drove.pos[2] - mounted.pos[2]);
+    out.car = { cars: mounted.cars, mounted: mounted.driving, dist: Number(dist.toFixed(1)), dismounted: !off.driving };
+    expect('araba: yere bırakılır ve binilir', mounted.cars === 1 && mounted.driving === true, out.car);
+    expect('araba: gazla ilerler', dist > 2, out.car);
+    expect('araba: R ile inilir', off.driving === false, out.car);
+    // Silahlar: tabanca ateş eder ve atış aralığına uyar; tüfek sağ tıkla yakınlaştırır.
+    await evalJs(`${v}.debug_set_slot(0, 105, 1); ${v}.debug_set_slot(2, 106, 1); ${v}.debug_select(0); ${v}.debug_set_look(1.0, -0.3); 1`);
+    await sleep(300);
+    const before = await state();
+    await evalJs(`${v}.debug_hold_break(true); ${v}.debug_hold_break(true); ${v}.debug_hold_break(false); 1`);
+    await sleep(60);
+    const shot = await state();
+    await evalJs(`${v}.debug_set_aim(true); 1`);
+    await sleep(700);
+    const pistolAim = await state();
+    await evalJs(`${v}.debug_select(2); 1`);
+    for (let i = 0; i < 60 && (await state()).zoom < 0.99; i++) await sleep(100);
+    const scoped = await state();
+    await evalJs(`${v}.debug_set_aim(false); 1`);
+    for (let i = 0; i < 60 && (await state()).zoom > 0.01; i++) await sleep(100);
+    const unscoped = await state();
+    out.guns = { shots: shot.shots - before.shots, kick: Number((shot.pitch - before.pitch).toFixed(3)),
+      pistolZoom: pistolAim.zoom, sniperZoom: scoped.zoom, after: unscoped.zoom };
+    expect('tabanca: tek atış (aralık dolmadan ikincisi yok) ve geri tepme', out.guns.shots === 1 && out.guns.kick > 0, out.guns);
+    expect('tabanca yakınlaştırmaz, tüfek yakınlaştırır', pistolAim.zoom === 0 && scoped.zoom >= 0.99, out.guns);
+    expect('nişan bırakılınca yakınlaştırma kapanır', unscoped.zoom <= 0.01, out.guns);
+
+    // Canlılar: vurulan hayvan koşarak kaçar; zombi oyuncuyu koşarak kovalar.
+    {
+      await evalJs(`${v}.debug_select(0); 1`);
+      let fled = null;
+      for (let i = 0; i < 8 && !fled; i++) {
+        await evalJs(`${v}.debug_set_look(${1.0 + i * 0.8}, -0.25); ${v}.debug_spawn_mob(0); 1`);
+        await sleep(450);
+        // Doğrudan koyunun gövdesine nişan al (gezindiği için yeri değişir).
+        const s = await state();
+        const sheep = s.mobs.filter(m => m[0] === 'Koyun').pop();
+        if (!sheep) continue;
+        const [dx, dy, dz] = [sheep[4] - s.pos[0], sheep[5] + 0.6 - (s.pos[1] + 1.62), sheep[6] - s.pos[2]];
+        await evalJs(`${v}.debug_set_look(${Math.atan2(-dx, -dz)}, ${Math.atan2(dy, Math.hypot(dx, dz))}); ${v}.debug_hold_break(true); ${v}.debug_hold_break(false); 1`);
+        await sleep(350);
+        fled = (await state()).mobs.find(m => m[0] === 'Koyun' && m[2] < 8) || null;
+      }
+      await evalJs(`${v}.debug_set_mode(true); ${v}.debug_set_time(0.85); ${v}.debug_spawn_mob(3); 1`);
+      let chasing = null;
+      for (let i = 0; i < 40 && !chasing; i++) {
+        await sleep(100);
+        chasing = (await state()).mobs.find(m => m[0] === 'Zombi' && m[1] === 'Run') || null;
+      }
+      // Mantar Kafa zehir tükürür (yaratıcıda oyuncu zehirlenmez).
+      await evalJs(`${v}.debug_spawn_mob(4); 1`);
+      let spat = false;
+      for (let i = 0; i < 150 && !spat; i++) { await sleep(100); spat = (await evalJs(`window.__sfxLog.includes('shroom_spit')`)) === true; }
+      const sounds = await evalJs(`[...new Set(window.__sfxLog)]`);
+      const wandering = (await state()).mobs.filter(m => m[1] === 'Idle' || m[1] === 'Walk').length;
+      await evalJs(`${v}.debug_set_time(0.3); 1`);
+      let burned = false;
+      // Yanma oyun zamanıyla ilerler; yavaş makinede uzun sürebilir.
+      for (let i = 0; i < 600 && !burned; i++) { await sleep(100); burned = !(await state()).mobs.some(m => m[0] === 'Zombi'); }
+      // Sonraki adımları canlılar etkilemesin.
+      await evalJs(`${v}.debug_clear_mobs(); ${v}.debug_set_mode(false); 1`);
+      await sleep(300);
+      out.mobs = { fled, chasing, wandering, burned, spat, sounds };
+      expect('mantar kafa zehir tükürür', spat, out.mobs);
+      expect('sesler çalınır: atış, koyunun canı yanması, zombinin fark etmesi',
+        ['shot', 'sheep_hurt', 'zombie_alert'].every(n => sounds.includes(n)), sounds);
+      expect('vurulan koyun hasar alır ve koşarak kaçar', fled && fled[1] === 'Run' && fled[2] === 3, out.mobs);
+      expect('zombi oyuncuyu koşarak kovalar', !!chasing, out.mobs);
+      expect('zombi gündüz yanar', burned, out.mobs);
+    }
+
+    // Sonraki adımlar başlangıç envanterini ve duran bir oyuncuyu bekler.
+    await evalJs(`${v}.debug_set_slot(0, 1, 16); ${v}.debug_set_slot(2, 3, 24); ${v}.debug_select(8); 1`);
+  }
 
   // ---- 12) FPS + çizim (yatay bakış) ----
   await evalJs(`window.__vcRs.debug_set_look(0.9, -0.05); 1`);
@@ -191,10 +369,32 @@ async function main() {
   out.perf = { fps: st.fps, chunks: st.chunks, draws: st.draws, tris: st.tris, pos: st.pos };
 
   // ---- 13) Uzak ışınlanma (sonsuz dünya akışı) ----
-  await evalJs(`window.__vcRs.debug_teleport(50000.5, 90, -50000.5); 1`);
-  await sleep(3500);
-  st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
-  out.farTeleport = { chunks: st.chunks, pos: st.pos, fps: st.fps };
+  // İkinci nokta, chunk uzaklığının karesi 32 biti taşacak kadar uzaktır:
+  // eski chunk'lar yine de boşaltılmalı (bellek sınırı korunmalı).
+  //
+  // Yaratıcı modda yapılır: hayatta kalma modunda y=90'a ışınlanan oyuncu
+  // düşüp ölür, yeniden doğuş da sonraki adımların (yüzme testi) ışınlamasını
+  // zamanlamaya bağlı olarak ezer.
+  const home = (await state()).pos;
+  await evalJs(`window.__vcRs.debug_set_mode(true); 1`);
+  out.farTeleport = [];
+  for (const [x, z] of [[50000.5, -50000.5], [1000000.5, -1000000.5]]) {
+    await evalJs(`window.__vcRs.debug_teleport(${x}, 90, ${z}); 1`);
+    await sleep(500);
+    st = await waitForStreaming();
+    const r = { chunks: st.chunks, gpuChunks: st.gpuChunks, wantMesh: st.wantMesh,
+      meshPending: st.meshPending, pos: st.pos, fps: st.fps };
+    out.farTeleport.push(r);
+    expect(`ışınlanma (${x}, ${z}): akış tamamlandı`, st.meshPending === 0, r);
+    expect(`ışınlanma (${x}, ${z}): eski chunk'lar boşaltıldı`,
+      st.chunks <= boot.chunks * 1.5 && st.gpuChunks <= st.chunks, r);
+  }
+  // Başlangıç noktasına, zemine geri dön ve hayatta kalmaya geç.
+  await evalJs(`window.__vcRs.debug_teleport(${home[0]}, ${home[1] + 0.05}, ${home[2]}); 1`);
+  await sleep(500);
+  await waitForStreaming();
+  await evalJs(`window.__vcRs.debug_set_mode(false); 1`);
+  await sleep(300);
 
   // ---- 14) Envanter ekranı ----
   await evalJs(`window.__vcRs.debug_set_open(true); 1`);
@@ -283,10 +483,34 @@ async function main() {
     if (out.swim.sinkDrop > 4.0) {
       problems.push(`H6: suda batma çok hızlı (0,9 sn'de ${out.swim.sinkDrop} blok)`);
     }
+
+    // Olta: suya atılır, balık vurunca çekilir.
+    {
+      const v = 'window.__vcRs';
+      await evalJs(`${v}.debug_set_slot(3, 102, 1); ${v}.debug_select(3); ${v}.debug_set_look(0.8, -1.2); 1`);
+      await sleep(300);
+      const fishBefore = await evalJs(`${v}.debug_count(103)`);
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(300);
+      const cast = (await state()).fishing;
+      let bit = false;
+      for (let i = 0; i < 900 && !bit; i++) { bit = (await state()).fishing === 'biting'; if (!bit) await sleep(40); }
+      await evalJs(`${v}.debug_right_click(); 1`);
+      await sleep(200);
+      const fish = (await evalJs(`${v}.debug_count(103)`)) - fishBefore;
+      out.fishing = { cast, bit, fish };
+      expect('olta: suya atılır', cast === 'waiting', out.fishing);
+      expect('olta: balık vurunca çekilir ve envantere girer', bit && fish === 1, out.fishing);
+    }
   }
 
   out.problems = problems;
   console.log(JSON.stringify(out, null, 2));
+  if (problems.length > 0) {
+    console.log(`BAŞARISIZ: ${problems.length} sorun`);
+    process.exit(1);
+  }
+  console.log('BAŞARILI: tüm denetimler geçti');
   process.exit(0);
 }
 

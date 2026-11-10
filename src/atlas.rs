@@ -106,13 +106,14 @@ pub fn build_atlas() -> Vec<u8> {
         [clamp255(158.0 * f), clamp255(128.0 * f), clamp255(84.0 * f), 255]
     });
 
-    // 8 — yaprak: yoğun gürültü + koyu delikler
+    // 8 — yaprak: yoğun gürültü + saydam delikler
     paint(&mut a, crate::blocks::T_LEAVES, |x, y| {
         let n = hash2f(x, y, 141);
         let n2 = hash2f(x, y, 142);
-        let mut f = 0.70 + n * 0.52;
-        if n2 > 0.88 {
-            f *= 0.58;
+        let f = 0.70 + n * 0.52;
+        // Delikler: yaprakların arasından gökyüzü ve ışık görünür.
+        if n2 > 0.86 {
+            return [0, 0, 0, 0];
         }
         [clamp255(58.0 * f), clamp255(112.0 * f), clamp255(40.0 * f), 255]
     });
@@ -212,6 +213,18 @@ pub fn build_atlas() -> Vec<u8> {
             clamp255(base[2] as f64 * k),
             255,
         ]
+    });
+
+    // 15 — meşale ikonu: saydam zemin üstünde sap ve alev
+    paint(&mut a, crate::blocks::T_TORCH, |x, y| {
+        if (7..=8).contains(&x) && (6..=14).contains(&y) {
+            return shade([122.0, 86.0, 46.0], hash2f(x, y, 211), 0.2);
+        }
+        if (6..=9).contains(&x) && (2..=5).contains(&y) {
+            let core = (7..=8).contains(&x) && (3..=5).contains(&y);
+            return if core { [255, 236, 130, 255] } else { [246, 150, 40, 255] };
+        }
+        [0, 0, 0, 0]
     });
 
     a
