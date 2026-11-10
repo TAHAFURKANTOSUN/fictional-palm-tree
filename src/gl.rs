@@ -853,6 +853,7 @@ impl Renderer {
             let mut bytes: Vec<u8> = Vec::with_capacity(fx.boxes.len() * 36 * BOX_VERTEX_BYTES);
             for b in fx.boxes {
                 let (sin, cos) = b.yaw.sin_cos();
+                let (ps, pc) = b.pitch.sin_cos();
                 let rel = [
                     (b.center[0] - cam_pos[0]) as f32,
                     (b.center[1] - cam_pos[1]) as f32,
@@ -868,8 +869,11 @@ impl Renderer {
                     for corner in [0usize, 1, 2, 0, 2, 3] {
                         let v = face.verts[corner];
                         let lx = (v[0] as f32 * 2.0 - 1.0) * b.half[0];
-                        let ly = (v[1] as f32 * 2.0 - 1.0) * b.half[1];
-                        let lz = (v[2] as f32 * 2.0 - 1.0) * b.half[2];
+                        let y0 = (v[1] as f32 * 2.0 - 1.0) * b.half[1];
+                        let z0 = (v[2] as f32 * 2.0 - 1.0) * b.half[2];
+                        // Önce yerel X etrafında eğim (ön uç yukarı), sonra yön.
+                        let ly = y0 * pc - z0 * ps;
+                        let lz = y0 * ps + z0 * pc;
                         // Yerel -Z, `yaw` ile oyuncunun ileri yönüne döner.
                         let p = [rel[0] + lx * cos + lz * sin, rel[1] + ly, rel[2] - lx * sin + lz * cos];
                         for c in p {

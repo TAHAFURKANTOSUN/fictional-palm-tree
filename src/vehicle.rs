@@ -26,12 +26,16 @@ pub struct Car {
     pub speed: f64,
     /// Tekerlek dönüşü için kat edilen yol.
     pub travelled: f64,
+    /// Yumuşatılmış direksiyon açısı (−1..1); ön tekerlekler buna göre kırılır.
+    pub steer: f64,
+    /// Son gaz girdisi (egzoz dumanı ve gövde yatması için).
+    pub throttle: f64,
 }
 
 impl Car {
     pub fn new(pos: [f64; 3], yaw: f64) -> Self {
         let body = Player { pos, radius: 0.62, height: 1.15, ..Player::default() };
-        Self { body, yaw, speed: 0.0, travelled: 0.0 }
+        Self { body, yaw, speed: 0.0, travelled: 0.0, steer: 0.0, throttle: 0.0 }
     }
 
     /// İleri yönün yatay birim vektörü (oyuncunun bakış kuralıyla aynı).
@@ -42,6 +46,8 @@ impl Car {
     /// Bir fizik adımı. `controls` yoksa araba boştadır ve yavaşlayarak durur.
     pub fn update(&mut self, world: &World, dt: f64, controls: Option<Controls>) {
         let c = controls.unwrap_or_default();
+        self.throttle = c.throttle;
+        self.steer += (c.steer - self.steer) * (dt * 9.0).min(1.0);
         if c.throttle != 0.0 {
             let target = if c.throttle > 0.0 { MAX_SPEED } else { -REVERSE_SPEED } * c.throttle.abs();
             self.speed += (target - self.speed) * (dt * ACCEL).min(1.0);
@@ -143,8 +149,13 @@ mod tests {
         assert!(car.body.pos[2] < 12.0, "ileri gitmedi: z={}", car.body.pos[2]);
         assert!((car.body.pos[0] - 0.5).abs() < 1e-6);
         let yaw = car.yaw;
+        let wheel = car.travelled;
         drive(&mut car, &w, 0.5, Some(Controls { throttle: 1.0, steer: 1.0 }));
         assert!(car.yaw > yaw + 0.5, "direksiyon çalışmadı");
+        assert!(car.steer > 0.9, "ön tekerlekler kırılmalı");
+        assert!(car.travelled > wheel + 3.0, "tekerlekler yol kadar dönmeli");
+        drive(&mut car, &w, 0.5, GAS);
+        assert!(car.steer.abs() < 0.05, "direksiyon bırakılınca düzelmeli");
     }
 
     #[test]

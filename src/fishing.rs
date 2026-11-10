@@ -7,6 +7,8 @@ use crate::world::World;
 pub const CAST_RANGE: f64 = 14.0;
 /// Balık vurduktan sonra çekmek için tanınan süre (saniye).
 pub const BITE_WINDOW: f64 = 1.4;
+/// Şamandıranın oltadan suya uçuş süresi (saniye).
+pub const CAST_FLIGHT: f64 = 0.45;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase {
@@ -17,6 +19,8 @@ pub enum Phase {
 }
 
 pub struct Fishing {
+    /// Şamandıranın fırlatıldığı nokta (olta ucu).
+    pub from: [f64; 3],
     /// Şamandıranın su yüzeyindeki konumu.
     pub bobber: [f64; 3],
     pub phase: Phase,
@@ -24,8 +28,28 @@ pub struct Fishing {
 }
 
 impl Fishing {
-    pub fn new(bobber: [f64; 3], wait: f64) -> Self {
-        Self { bobber, phase: Phase::Waiting(wait), age: 0.0 }
+    pub fn new(from: [f64; 3], bobber: [f64; 3], wait: f64) -> Self {
+        Self { from, bobber, phase: Phase::Waiting(wait), age: 0.0 }
+    }
+
+    /// Şamandıra hâlâ havada mı?
+    pub fn in_flight(&self) -> bool {
+        self.age < CAST_FLIGHT
+    }
+
+    /// Şamandıranın o anki konumu: önce oltadan suya bir yay çizer, sonra
+    /// su yüzeyinde salınır.
+    pub fn bobber_now(&self) -> [f64; 3] {
+        if !self.in_flight() {
+            return [self.bobber[0], self.bobber[1] + self.bob_offset(), self.bobber[2]];
+        }
+        let t = self.age / CAST_FLIGHT;
+        let arc = 4.0 * t * (1.0 - t) * 1.6;
+        [
+            self.from[0] + (self.bobber[0] - self.from[0]) * t,
+            self.from[1] + (self.bobber[1] - self.from[1]) * t + arc,
+            self.from[2] + (self.bobber[2] - self.from[2]) * t,
+        ]
     }
 
     /// Zamanı ilerletir. Balık **bu adımda** vurduysa `true` döner. Kaçan
@@ -95,7 +119,7 @@ mod tests {
 
     #[test]
     fn fish_bites_after_the_wait_and_can_be_caught() {
-        let mut f = Fishing::new([0.0; 3], 3.0);
+        let mut f = Fishing::new([0.0; 3], [0.0; 3], 3.0);
         let mut bites = 0;
         for _ in 0..29 {
             bites += f.tick(0.1, 5.0) as u32;
@@ -110,13 +134,26 @@ mod tests {
 
     #[test]
     fn a_missed_bite_goes_back_to_waiting() {
-        let mut f = Fishing::new([0.0; 3], 0.1);
+        let mut f = Fishing::new([0.0; 3], [0.0; 3], 0.1);
         assert!(f.tick(0.2, 4.0));
         for _ in 0..20 {
             f.tick(0.1, 4.0);
         }
         assert!(!f.reel(), "süre dolunca balık kaçmalı");
         assert!(matches!(f.phase, Phase::Waiting(t) if t > 3.0));
+    }
+
+    #[test]
+    fn bobber_flies_in_an_arc_from_the_rod_to_the_water() {
+        let mut f = Fishing::new([0.0, 10.0, 0.0], [8.0, 6.0, 0.0], 5.0);
+        assert_eq!(f.bobber_now(), [0.0, 10.0, 0.0]);
+        f.tick(CAST_FLIGHT / 2.0, 5.0);
+        let mid = f.bobber_now();
+        assert!(f.in_flight() && (mid[0] - 4.0).abs() < 1e-9);
+        assert!(mid[1] > 9.0, "yayın ortası iki ucun ortalamasından yüksek olmalı: {}", mid[1]);
+        f.tick(CAST_FLIGHT, 5.0);
+        let end = f.bobber_now();
+        assert!(!f.in_flight() && end[0] == 8.0 && (end[1] - 6.0).abs() < 0.05);
     }
 
     fn pond() -> World {

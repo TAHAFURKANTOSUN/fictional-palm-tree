@@ -65,6 +65,10 @@ pub struct BoxInst {
     pub half: [f32; 3],
     /// Dikey eksen etrafında dönüş (oyuncunun `yaw` kuralıyla).
     pub yaw: f32,
+    /// Yerel X ekseni etrafında dönüş, `yaw`'dan önce uygulanır: pozitif
+    /// değer kutunun ön (−Z) ucunu yukarı kaldırır. Tekerlek dönüşü, olta
+    /// kamışı ve misina bununla yönlendirilir.
+    pub pitch: f32,
     pub color: [u8; 3],
     /// Kendi ışığını yayar: gece kararmaz (alev).
     pub glow: bool,
@@ -79,6 +83,8 @@ pub struct Particle {
     /// Dünya birimiyle kenar uzunluğu.
     pub size: f32,
     pub color: [u8; 3],
+    /// Yerçekimi çarpanı: 1 düşen moloz, 0 süzülen duman, negatif yükselen kıvılcım.
+    pub gravity: f32,
 }
 
 const MAX_PARTICLES: usize = 512;
@@ -137,8 +143,28 @@ impl Particles {
             ];
             let life = 0.45 + self.rand() * 0.45;
             let size = 0.07 + self.rand() as f32 * 0.07;
-            self.list.push(Particle { pos, vel, life, size, color });
+            self.list.push(Particle { pos, vel, life, size, color, gravity: 1.0 });
         }
+    }
+
+    /// Tek bir serbest parçacık (duman, kıvılcım, su damlası) ekler; hıza
+    /// küçük bir rastgele sapma katılır.
+    pub fn puff(&mut self, pos: [f64; 3], vel: [f64; 3], spread: f64, color: [u8; 3], life: f64, size: f32, gravity: f32) {
+        if self.list.len() >= MAX_PARTICLES {
+            self.list.remove(0);
+        }
+        let vel = [
+            vel[0] + (self.rand() - 0.5) * spread,
+            vel[1] + (self.rand() - 0.5) * spread,
+            vel[2] + (self.rand() - 0.5) * spread,
+        ];
+        let life = life * (0.7 + self.rand() * 0.6);
+        self.list.push(Particle { pos, vel, life, size, color, gravity });
+    }
+
+    /// `rate` (1/sn) sıklığında olan bir olay bu `dt` adımında gerçekleşti mi?
+    pub fn chance(&mut self, rate: f64, dt: f64) -> bool {
+        self.rand() < rate * dt
     }
 
     /// Yerçekimi ve basit çarpışma: katı bloğa giren parçacık o eksende durur.
@@ -148,7 +174,7 @@ impl Particles {
         };
         for p in self.list.iter_mut() {
             p.life -= dt;
-            p.vel[1] -= PARTICLE_GRAVITY * dt;
+            p.vel[1] -= PARTICLE_GRAVITY * p.gravity as f64 * dt;
             for a in 0..3 {
                 let old = p.pos[a];
                 p.pos[a] += p.vel[a] * dt;
@@ -235,6 +261,19 @@ mod tests {
             p.update(0.05, &w);
         }
         assert!(p.list.is_empty(), "parçacıklar ömrü dolunca silinmeli");
+    }
+
+    #[test]
+    fn sparks_rise_and_smoke_drifts() {
+        let w = World::new(1);
+        let mut p = Particles::default();
+        p.puff([0.5, 50.0, 0.5], [0.0, 0.2, 0.0], 0.0, [255, 200, 80], 1.0, 0.04, -0.05);
+        p.puff([0.5, 50.0, 0.5], [0.0, 0.0, 0.0], 0.0, [90, 90, 90], 1.0, 0.1, 1.0);
+        for _ in 0..10 {
+            p.update(0.05, &w);
+        }
+        assert!(p.list[0].pos[1] > 50.1, "kıvılcım yükselmeli");
+        assert!(p.list[1].pos[1] < 49.0, "ağır parçacık düşmeli");
     }
 
     #[test]

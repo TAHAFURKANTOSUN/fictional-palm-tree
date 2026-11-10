@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-159%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-161%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -52,15 +52,18 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   uzakta bile geometri titremez.
 - 📦 **Tek dosyalık sürüm** — çift tıklanarak açılan, sunucu gerektirmeyen HTML.
 - 🔦 **Meşale** — geceyi gerçekten aydınlatır; elde tutarken de ışık verir.
+  Alevi titrer, kıvılcım ve duman çıkarır.
 - 🎣 **Olta ve balık** — suya at, balık vurunca çek; balık yenir (+5 açlık).
+  Kamış savrulur, şamandıra yay çizerek uçar, misina ve su sıçraması çizilir.
 - 🚗 **Araba** — üret, yere bırak, <kbd>R</kbd> ile bin; tek blokluk basamakları çıkar.
+  Tekerlekler döner, öndekiler direksiyonla kırılır; egzoz dumanı ve toz çıkar.
 - 🌗 **Gündüz–gece döngüsü** — 12 dakikalık gün; gün batımı renkleri, ay ve
   yıldızlar, saate göre ortam ışığı. Yaprakların arasından gökyüzü görünür.
 - 🌅 **Görsel dokunuşlar** — güneş ve halesi, dalgalanan su parıltısı, su altı
   sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **159 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **161 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -285,7 +288,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 159 test
+cargo test --lib          # 161 test
 ```
 
 <details>

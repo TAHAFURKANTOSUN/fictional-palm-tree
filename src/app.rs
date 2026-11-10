@@ -117,6 +117,9 @@ struct Game {
     fx_lights: Vec<[f32; 4]>,
     /// Koşarken görüş açısının yumuşakça genişlemesi (0..1).
     fov_kick: f32,
+    /// Yürüme salınımının fazı ve olta savurma animasyonu (1 → 0).
+    walk_phase: f64,
+    rod_swing: f64,
     /// Günün zamanı, 0..1 (0 = gün doğumu).
     day_time: f64,
     governor: QualityGovernor,
@@ -466,6 +469,10 @@ impl Game {
     /// Olta: suya bakarken sağ tık atar; balık vurunca tekrar sağ tık çeker.
     fn use_rod(&mut self) {
         if let Some(f) = self.fishing.take() {
+            self.rod_swing = 1.0;
+            for _ in 0..6 {
+                self.particles.puff(f.bobber, [0.0, 2.0, 0.0], 1.6, [150, 196, 240], 0.4, 0.05, 1.0);
+            }
             if f.reel() {
                 if self.inv.add(FISH, 1) > 0 {
                     self.hud.toast("Envanter dolu!");
@@ -480,7 +487,9 @@ impl Game {
         let (eye, dir) = (self.player.eye(), self.player.look_dir());
         match find_water(&self.world, eye, dir, CAST_RANGE) {
             Some(bobber) => {
-                self.fishing = Some(Fishing::new(bobber, 2.5 + js_random() * 5.0));
+                let from = self.rod_pose(0.0).1;
+                self.fishing = Some(Fishing::new(from, bobber, 2.5 + js_random() * 5.0));
+                self.rod_swing = 1.0;
                 self.hud.toast("Olta atıldı — balık vurunca sağ tıkla");
             }
             None => self.hud.toast("Oltayı atmak için suya bak"),
@@ -495,8 +504,18 @@ impl Game {
             self.fishing = None;
             return;
         }
-        if f.tick(dt, 2.5 + js_random() * 5.0) {
+        let was_flying = f.in_flight();
+        let bit = f.tick(dt, 2.5 + js_random() * 5.0);
+        let landed = was_flying && !f.in_flight();
+        let b = f.bobber;
+        if bit {
             self.hud.toast("Balık vurdu! Sağ tıkla");
+        }
+        // Şamandıra suya değince ve balık vurunca su sıçrar.
+        if landed || bit {
+            for _ in 0..if bit { 14 } else { 8 } {
+                self.particles.puff([b[0], b[1] + 0.05, b[2]], [0.0, 2.6, 0.0], 2.2, [150, 196, 240], 0.45, 0.06, 1.0);
+            }
         }
     }
 
@@ -538,7 +557,7 @@ impl Game {
             ((b[0] - p[0]).powi(2) + (b[1] - p[1]).powi(2) + (b[2] - p[2]).powi(2)).sqrt()
         };
         let nearest = (0..self.cars.len()).min_by(|&a, &b| dist(&self.cars[a]).total_cmp(&dist(&self.cars[b])));
-        let Some(i) = nearest.filter(|&i| dist(&self.cars[i]) < 3.5) else {
+        let Some(i) = nearest.filter(|&i| dist(&self.cars[i]) < 5.0) else {
             self.hud.toast("Yakında araba yok");
             return;
         };
@@ -597,13 +616,94 @@ impl Game {
         }
     }
 
+    /// Görüş doğrultusunun (ileri, sağ, yukarı) birim vektörleri.
+    fn view_basis(&self) -> ([f64; 3], [f64; 3], [f64; 3]) {
+        let f = self.player.look_dir();
+        let r = [self.player.yaw.cos(), 0.0, -self.player.yaw.sin()];
+        let u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+        (f, r, u)
+    }
+
+    /// Gözün önünde, ekranın sağ altında bir nokta (elde tutulan eşyalar için).
+    /// Yürürken hafifçe sallanır.
+    fn hand_point(&self, right: f64, up: f64, fwd: f64) -> [f64; 3] {
+        let (f, r, u) = self.view_basis();
+        let e = self.player.eye();
+        let sway = (self.walk_phase * 1.1).sin() * 0.012;
+        let bob = (self.walk_phase * 2.2).sin().abs() * 0.014;
+        let (right, up) = (right + sway, up - bob);
+        [
+            e[0] + r[0] * right + u[0] * up + f[0] * fwd,
+            e[1] + r[1] * right + u[1] * up + f[1] * fwd,
+            e[2] + r[2] * right + u[2] * up + f[2] * fwd,
+        ]
+    }
+
+    /// Elde tutulan oltanın (merkez, uç, yön, eğim) değerleri. `swing` 0..1:
+    /// savurma animasyonunda kamış geriye yatıp öne kamçılanır.
+    fn rod_pose(&self, swing: f64) -> ([f64; 3], [f64; 3], f64, f64) {
+        const LEN: f64 = 0.95;
+        let base = self.hand_point(0.30, -0.30, 0.42);
+        let yaw = self.player.yaw - 0.10;
+        let pitch = (self.player.pitch + 0.55 + (swing * std::f64::consts::PI).sin() * 0.9).min(1.5);
+        let d = [-yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos()];
+        let at = |t: f64| [base[0] + d[0] * t, base[1] + d[1] * t, base[2] + d[2] * t];
+        (at(LEN * 0.5), at(LEN), yaw, pitch)
+    }
+
+    /// Sürekli animasyonlar: yürüme salınımı, olta savurma, meşale kıvılcımı,
+    /// egzoz dumanı ve tekerlek tozu.
+    fn update_animations(&mut self, dt: f64) {
+        if self.player.on_ground && self.driving.is_none() {
+            self.walk_phase += self.moved_dist * 2.6;
+        }
+        self.rod_swing = (self.rod_swing - dt * 3.2).max(0.0);
+
+        // Meşaleler: ara sıra yükselen kıvılcım ve ince duman (yakındakiler).
+        let p = self.player.pos;
+        for i in 0..self.torches.len() {
+            let t = self.torches[i];
+            let (x, y, z) = (t[0] as f64 + 0.5, t[1] as f64 + 0.72, t[2] as f64 + 0.5);
+            if (x - p[0]).abs() + (z - p[2]).abs() > 28.0 {
+                continue;
+            }
+            if self.particles.chance(5.0, dt) {
+                self.particles.puff([x, y, z], [0.0, 0.7, 0.0], 0.5, [255, 196, 84], 0.55, 0.035, -0.04);
+            }
+            if self.particles.chance(2.0, dt) {
+                self.particles.puff([x, y + 0.1, z], [0.0, 0.5, 0.0], 0.2, [70, 66, 62], 0.9, 0.05, -0.02);
+            }
+        }
+        // Elde meşale: kıvılcımlar alevden çıkar.
+        if self.driving.is_none() && self.inv.selected_stack().map(|s| s.id) == Some(TORCH as u16) && self.particles.chance(4.0, dt) {
+            let tip = self.hand_point(0.36, -0.15, 0.6);
+            self.particles.puff(tip, [0.0, 0.6, 0.0], 0.4, [255, 196, 84], 0.4, 0.02, -0.04);
+        }
+
+        // Arabalar: gaza basınca egzoz dumanı, hızlıyken tekerlek tozu.
+        for i in 0..self.cars.len() {
+            let (pos, f, speed, throttle, on_ground) = {
+                let c = &self.cars[i];
+                (c.body.pos, c.forward(), c.speed, c.throttle, c.body.on_ground)
+            };
+            let back = [pos[0] - f[0] * 1.05, pos[1] + 0.32, pos[2] - f[1] * 1.05];
+            if throttle != 0.0 && self.particles.chance(16.0, dt) {
+                self.particles.puff(back, [-f[0] * 1.2, 0.5, -f[1] * 1.2], 0.5, [96, 96, 100], 0.6, 0.09, -0.03);
+            }
+            if on_ground && speed.abs() > 5.0 && self.particles.chance(speed.abs() * 1.4, dt) {
+                let color = [150, 128, 96];
+                self.particles.puff([back[0], pos[1] + 0.08, back[2]], [0.0, 0.9, 0.0], 1.4, color, 0.4, 0.07, 0.5);
+            }
+        }
+    }
+
     /// Bu karede çizilecek kutuları ve nokta ışıkları hazırlar.
     fn build_effects(&mut self, cam: [f64; 3]) {
         if self.torches_dirty {
             self.refresh_torches();
         }
-        let boxes = &mut self.fx_boxes;
-        let lights = &mut self.fx_lights;
+        let mut boxes = std::mem::take(&mut self.fx_boxes);
+        let mut lights = std::mem::take(&mut self.fx_lights);
         boxes.clear();
         lights.clear();
         let rel = |p: [f64; 3]| [(p[0] - cam[0]) as f32, (p[1] - cam[1]) as f32, (p[2] - cam[2]) as f32];
@@ -621,10 +721,12 @@ impl Game {
         for t in self.torches.iter() {
             let (x, y, z) = (t[0] as f64 + 0.5, t[1] as f64, t[2] as f64 + 0.5);
             let flicker = ((self.time * 9.0 + (t[0] * 7 + t[2] * 13) as f32).sin() * 0.5 + 0.5) * 0.25;
-            boxes.push(BoxInst { center: [x, y + 0.28, z], half: [0.06, 0.28, 0.06], yaw: 0.0, color: [128, 92, 52], glow: false });
+            boxes.push(BoxInst { center: [x, y + 0.28, z], half: [0.06, 0.28, 0.06], yaw: 0.0, pitch: 0.0, color: [128, 92, 52], glow: false });
             let s = 0.085 + flicker * 0.05;
-            boxes.push(BoxInst { center: [x, y + 0.62 + s as f64 * 0.3, z], half: [s, s, s], yaw: 0.7, color: [255, 190, 70], glow: true });
-            boxes.push(BoxInst { center: [x, y + 0.62, z], half: [0.05, 0.07, 0.05], yaw: 0.0, color: [255, 245, 190], glow: true });
+            // Alev hafifçe sağa sola eğilir.
+            let x = x + (self.time * 3.1 + t[0] as f32).sin() as f64 * 0.018;
+            boxes.push(BoxInst { center: [x, y + 0.62 + s as f64 * 0.3, z], half: [s, s, s], yaw: 0.7, pitch: 0.0, color: [255, 190, 70], glow: true });
+            boxes.push(BoxInst { center: [x, y + 0.62, z], half: [0.05, 0.07, 0.05], yaw: 0.0, pitch: 0.0, color: [255, 245, 190], glow: true });
             if lights.len() < 8 {
                 let r = rel([x, y + 0.7, z]);
                 lights.push([r[0], r[1], r[2], 12.5 + flicker]);
@@ -635,35 +737,77 @@ impl Game {
         for (i, car) in self.cars.iter().enumerate() {
             // Sürülen arabanın kabini çizilmez: göz içinde durur, tavan görüşü kapatırdı.
             let driven = self.driving == Some(i);
-            let p = car.body.pos;
+            let mut p = car.body.pos;
             let yaw = car.yaw as f32;
+            // Süspansiyon: hızla artan hafif zıplama; gaz/frende gövde yatar.
+            let pace = (car.speed.abs() / crate::vehicle::MAX_SPEED).min(1.0);
+            p[1] += (car.travelled * 2.4).sin() * 0.025 * pace;
+            let lean = (car.throttle * 0.045 * (1.0 - pace * 0.6)) as f32;
             let f = car.forward();
             let right = [-f[1], f[0]];
             // Yerel (sağ, yukarı, ileri) ofsetini dünyaya çevirir.
             let at = |r: f64, u: f64, fw: f64| [p[0] + right[0] * r + f[0] * fw, p[1] + u, p[2] + right[1] * r + f[1] * fw];
-            let mut add = |c: [f64; 3], half: [f32; 3], color: [u8; 3], glow: bool| {
-                boxes.push(BoxInst { center: c, half, yaw, color, glow });
+            let mut add = |c: [f64; 3], half: [f32; 3], yaw: f32, pitch: f32, color: [u8; 3], glow: bool| {
+                boxes.push(BoxInst { center: c, half, yaw, pitch, color, glow });
             };
-            add(at(0.0, 0.52, 0.0), [0.62, 0.24, 1.0], [200, 56, 44], false);
+            add(at(0.0, 0.52, 0.0), [0.62, 0.24, 1.0], yaw, lean, [200, 56, 44], false);
             if !driven {
-                add(at(0.0, 0.96, -0.12), [0.54, 0.2, 0.5], [176, 220, 240], false);
-                add(at(0.0, 1.18, -0.12), [0.56, 0.03, 0.52], [150, 40, 32], false);
+                add(at(0.0, 0.96, -0.12), [0.54, 0.2, 0.5], yaw, lean, [176, 220, 240], false);
+                add(at(0.0, 1.18, -0.12), [0.56, 0.03, 0.52], yaw, lean, [150, 40, 32], false);
             }
+            // Tekerlekler yol kadar döner; öndekiler direksiyonla kırılır.
+            let spin = (car.travelled / 0.26) as f32;
             for side in [-1.0, 1.0] {
-                add(at(0.4 * side, 0.56, 1.0), [0.12, 0.08, 0.02], [255, 244, 190], true);
+                add(at(0.4 * side, 0.56, 1.0), [0.12, 0.08, 0.02], yaw, lean, [255, 244, 190], true);
                 for end in [-0.62, 0.62] {
-                    add(at(0.6 * side, 0.26, end), [0.1, 0.26, 0.26], [28, 28, 30], false);
+                    let wheel_yaw = if end > 0.0 { yaw + car.steer as f32 * 0.5 } else { yaw };
+                    add(at(0.6 * side, 0.26, end), [0.1, 0.25, 0.25], wheel_yaw, spin, [28, 28, 30], false);
+                    // Jant: dönüşü görünür kılan açık renkli çubuk.
+                    add(at(0.66 * side, 0.26, end), [0.05, 0.2, 0.05], wheel_yaw, spin, [190, 190, 196], false);
                 }
             }
         }
 
-        // Şamandıra.
-        if let Some(fish) = &self.fishing {
-            let b = fish.bobber;
-            let y = b[1] + fish.bob_offset();
-            boxes.push(BoxInst { center: [b[0], y + 0.07, b[2]], half: [0.11, 0.09, 0.11], yaw: 0.0, color: [222, 56, 46], glow: false });
-            boxes.push(BoxInst { center: [b[0], y + 0.22, b[2]], half: [0.07, 0.05, 0.07], yaw: 0.0, color: [240, 240, 240], glow: false });
+        let held = if self.driving.is_none() && self.hud_visible { self.inv.selected_stack().map(|s| s.id) } else { None };
+
+        // Elde olta: kamış; atılmışsa şamandıra ve kamış ucundan ona misina.
+        let mut rod_tip = None;
+        if held == Some(FISHING_ROD) {
+            let (center, tip, yaw, pitch) = self.rod_pose(self.rod_swing);
+            boxes.push(BoxInst { center, half: [0.012, 0.012, 0.475], yaw: yaw as f32, pitch: pitch as f32, color: [166, 124, 69], glow: false });
+            rod_tip = Some(tip);
         }
+        if let Some(fish) = &self.fishing {
+            let b = fish.bobber_now();
+            boxes.push(BoxInst { center: [b[0], b[1] + 0.07, b[2]], half: [0.11, 0.09, 0.11], yaw: 0.0, pitch: 0.0, color: [222, 56, 46], glow: false });
+            boxes.push(BoxInst { center: [b[0], b[1] + 0.22, b[2]], half: [0.07, 0.05, 0.07], yaw: 0.0, pitch: 0.0, color: [240, 240, 240], glow: false });
+            if let Some(tip) = rod_tip {
+                let top = [b[0], b[1] + 0.27, b[2]];
+                let d = [top[0] - tip[0], top[1] - tip[1], top[2] - tip[2]];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+                boxes.push(BoxInst {
+                    center: [(tip[0] + top[0]) * 0.5, (tip[1] + top[1]) * 0.5, (tip[2] + top[2]) * 0.5],
+                    half: [0.008, 0.008, len as f32 * 0.5],
+                    yaw: (-d[0]).atan2(-d[2]) as f32,
+                    pitch: (d[1] / len).asin() as f32,
+                    color: [236, 240, 245],
+                    glow: false,
+                });
+            }
+        }
+
+        // Elde meşale: sap + titreyen alev.
+        if held == Some(TORCH as u16) {
+            let (yaw, pitch) = (self.player.yaw as f32, self.player.pitch as f32);
+            let flick = (self.time * 11.0).sin() * 0.5 + 0.5;
+            boxes.push(BoxInst { center: self.hand_point(0.36, -0.33, 0.6), half: [0.02, 0.13, 0.02], yaw, pitch, color: [128, 92, 52], glow: false });
+            let s = 0.024 + flick * 0.008;
+            boxes.push(BoxInst { center: self.hand_point(0.36, -0.18, 0.6), half: [s, s, s], yaw: yaw + 0.7, pitch, color: [255, 190, 70], glow: true });
+            boxes.push(BoxInst { center: self.hand_point(0.36, -0.185, 0.6), half: [0.012, 0.02, 0.012], yaw, pitch, color: [255, 245, 190], glow: true });
+        }
+
+        self.fx_boxes = boxes;
+        self.fx_lights = lights;
     }
 
     fn place_block(&mut self) {
@@ -844,6 +988,7 @@ impl Game {
         self.update_player(dt);
         self.update_parked_cars(dt);
         self.update_fishing(dt);
+        self.update_animations(dt);
         self.update_mining(dt);
         self.particles.update(dt, &self.world);
         self.update_survival(dt);
@@ -1798,6 +1943,8 @@ pub fn start() -> Result<(), JsValue> {
         fx_boxes: Vec::new(),
         fx_lights: Vec::new(),
         fov_kick: 0.0,
+        walk_phase: 0.0,
+        rod_swing: 0.0,
         day_time: START_TIME,
         governor: QualityGovernor::default(),
         render_scale: 1.0,
