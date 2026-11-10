@@ -18,6 +18,7 @@ use crate::crafting::{self, FillError, Grid};
 use crate::effects::{BoxInst, Mining, Particles};
 use crate::fishing::{find_water, Fishing, Phase, CAST_RANGE};
 use crate::vehicle::{Car, Controls};
+use crate::weapons::{shatters, weapon, Gun, Weapon};
 use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
@@ -121,6 +122,12 @@ struct Game {
     fx_lights: Vec<[f32; 4]>,
     /// Koşarken görüş açısının yumuşakça genişlemesi (0..1).
     fov_kick: f32,
+    gun: Gun,
+    /// Sağ tık basılı (dürbünlü silahta nişan).
+    aim_held: bool,
+    /// Kısa ömürlü mermi izleri: (namlu, isabet noktası, kalan süre).
+    tracers: Vec<([f64; 3], [f64; 3], f64)>,
+    shots_fired: u32,
     /// Yürüme salınımının fazı ve olta savurma animasyonu (1 → 0).
     walk_phase: f64,
     rod_swing: f64,
@@ -388,6 +395,10 @@ impl Game {
     /// basılı tutuldukça kırılır; yaratıcıda hemen (ve basılı tutulursa
     /// aralıklarla) kırılır.
     fn start_mining(&mut self) {
+        if let Some(w) = self.held_weapon() {
+            self.fire(w);
+            return;
+        }
         self.mining_held = true;
         self.creative_break_cd = 0.0;
         if self.target().is_some_and(|h| h.y <= 0) {
@@ -425,11 +436,78 @@ impl Game {
         }
     }
 
+    /// Elde (ve kullanılabilir durumda) bir silah varsa özellikleri.
+    fn held_weapon(&self) -> Option<&'static Weapon> {
+        if self.inv_open || self.survival.dead || self.driving.is_some() {
+            return None;
+        }
+        self.inv.selected_stack().and_then(|s| weapon(s.id))
+    }
+
+    /// Silahın namlu ucu (görüş uzayında sağ altta, ileride).
+    fn muzzle(&self, w: &Weapon) -> [f64; 3] {
+        let long = w.zoom_fov < 1.0;
+        self.hand_point(0.24, -0.2, if long { 1.02 } else { 0.72 })
+    }
+
+    /// Ateş: mermi anında gider (ışın). İsabet ettiği bloktan kırıntı saçar,
+    /// kırılgan blokları (cam, yaprak, meşale) parçalar.
+    fn fire(&mut self, w: &'static Weapon) {
+        if !self.gun.try_fire(w) {
+            return;
+        }
+        self.shots_fired += 1;
+        let (eye, d) = (self.player.eye(), self.player.look_dir());
+        let from = if self.gun.scoped() { eye } else { self.muzzle(w) };
+        let mut end = [eye[0] + d[0] * w.range, eye[1] + d[1] * w.range, eye[2] + d[2] * w.range];
+
+        if let Some(hit) = raycast_voxel(&self.world, eye[0], eye[1], eye[2], d[0], d[1], d[2], w.range) {
+            // Vurulan yüzün düzlemiyle kesişim noktası.
+            let (block, n) = ([hit.x, hit.y, hit.z], [hit.nx, hit.ny, hit.nz]);
+            if let Some(a) = (0..3).find(|&a| n[a] != 0) {
+                let plane = block[a] as f64 + if n[a] > 0 { 1.0 } else { 0.0 };
+                let t = (plane - eye[a]) / d[a];
+                end = [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t];
+            }
+            let id = self.world.get_block(hit.x, hit.y, hit.z);
+            let normal = [n[0] as f64, n[1] as f64, n[2] as f64];
+            let out = [end[0] + normal[0] * 0.04, end[1] + normal[1] * 0.04, end[2] + normal[2] * 0.04];
+            self.particles.spawn_impact(out, normal, id, &self.atlas_pixels);
+            if shatters(id) && hit.y > 0 {
+                self.world.set_block_raw(hit.x, hit.y, hit.z, crate::blocks::AIR);
+                self.torches_dirty = true;
+                self.remesh_around(hit.x, hit.y, hit.z);
+                self.particles.spawn_break(hit.x, hit.y, hit.z, id, &self.atlas_pixels);
+            }
+        }
+        self.tracers.push((from, end, 0.07));
+
+        // Geri tepme: namlu yukarı sıçrar, namludan duman çıkar.
+        let lim = std::f64::consts::FRAC_PI_2 - 0.001;
+        self.player.pitch = (self.player.pitch + w.kick).min(lim);
+        for _ in 0..4 {
+            self.particles.puff(from, [d[0] * 1.5, 0.4, d[2] * 1.5], 0.8, [150, 150, 150], 0.35, 0.05, -0.02);
+        }
+    }
+
+    fn update_weapons(&mut self, dt: f64) {
+        let aiming = self.aim_held && self.held_weapon().is_some_and(|w| w.zoom_fov < 1.0);
+        self.gun.tick(dt, aiming);
+        self.tracers.retain_mut(|t| {
+            t.2 -= dt;
+            t.2 > 0.0
+        });
+    }
+
     fn right_click(&mut self) {
         let Some(id) = self.inv.selected_stack().map(|s| s.id) else {
             self.place_block();
             return;
         };
+        // Silahta sağ tık nişandır (basılı tutulur); blok koymaz.
+        if weapon(id).is_some() {
+            return;
+        }
         if item_def(id).is_some_and(|d| d.food > 0) {
             self.survival.try_eat(&mut self.inv);
         } else if id == FISHING_ROD {
@@ -814,6 +892,52 @@ impl Game {
             }
         }
 
+        // Elde silah: geri tepmeyle geri kayıp namlusu kalkar. Dürbünden
+        // bakarken model çizilmez.
+        if let Some(w) = held.and_then(weapon).filter(|_| !self.gun.scoped()) {
+            let long = w.zoom_fov < 1.0;
+            let r = self.gun.recoil;
+            let (yaw, pitch) = (self.player.yaw as f32, (self.player.pitch + r * 0.22) as f32);
+            let back = r * 0.07;
+            let (metal, wood) = ([58, 62, 70], [112, 78, 46]);
+            let mut part = |right: f64, up: f64, fwd: f64, half: [f32; 3], color: [u8; 3], glow: bool| {
+                boxes.push(BoxInst { center: self.hand_point(right, up, fwd - back), half, yaw, pitch, color, glow });
+            };
+            if long {
+                part(0.24, -0.20, 0.68, [0.016, 0.02, 0.34], metal, false);
+                part(0.24, -0.23, 0.36, [0.022, 0.04, 0.12], wood, false);
+                part(0.24, -0.155, 0.6, [0.016, 0.016, 0.1], [26, 28, 32], false);
+            } else {
+                part(0.24, -0.20, 0.58, [0.022, 0.03, 0.12], metal, false);
+                part(0.24, -0.27, 0.5, [0.02, 0.055, 0.028], wood, false);
+            }
+            // Namlu alevi: çok kısa süren parlak kutular + çevreyi aydınlatan ışık.
+            let flash = self.gun.flash as f32;
+            if flash > 0.0 {
+                let m = if long { 1.06 } else { 0.74 };
+                let s = 0.012 + 0.026 * flash;
+                part(0.24, -0.20, m + 0.03, [s, s, s * 1.8], [255, 214, 110], true);
+                part(0.24, -0.20, m + 0.06, [s * 0.45, s * 0.45, s * 2.8], [255, 250, 220], true);
+                if lights.len() < 8 {
+                    let p = rel(self.hand_point(0.24, -0.2, m));
+                    lights.push([p[0], p[1], p[2], 7.0 + 4.0 * flash]);
+                }
+            }
+        }
+        // Mermi izleri: namludan isabet noktasına ince parlak çizgi.
+        for (from, to, _) in self.tracers.iter() {
+            let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+            boxes.push(BoxInst {
+                center: [(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5, (from[2] + to[2]) * 0.5],
+                half: [0.012, 0.012, len as f32 * 0.5],
+                yaw: (-d[0]).atan2(-d[2]) as f32,
+                pitch: (d[1] / len).asin() as f32,
+                color: [255, 236, 150],
+                glow: true,
+            });
+        }
+
         // Elde meşale: sap + titreyen alev.
         if held == Some(TORCH as u16) {
             let (yaw, pitch) = (self.player.yaw as f32, self.player.pitch as f32);
@@ -1007,6 +1131,7 @@ impl Game {
         self.update_parked_cars(dt);
         self.update_fishing(dt);
         self.update_animations(dt);
+        self.update_weapons(dt);
         self.update_mining(dt);
         self.particles.update(dt, &self.world);
         self.update_survival(dt);
@@ -1240,7 +1365,9 @@ impl Game {
 
         // Bakılan bloğun çerçevesi (arayüz gizliyken ya da envanterde çizilmez);
         // kazılıyorsa çatlak ilerlemesiyle birlikte.
-        let crack = if self.started && self.hud_visible && !self.inv_open && !self.survival.dead {
+        // Silah eldeyken blok kazılmaz; çerçeve de (özellikle dürbünde) çizilmez.
+        let armed = self.held_weapon().is_some();
+        let crack = if self.started && self.hud_visible && !self.inv_open && !self.survival.dead && !armed {
             self.target().filter(|h| h.y > 0).map(|h| {
                 let block = [h.x, h.y, h.z];
                 let progress = if self.mining.target == Some(block) { self.mining.progress as f32 } else { 0.0 };
@@ -1254,7 +1381,7 @@ impl Game {
             cam,
             self.player.yaw as f32,
             self.player.pitch as f32,
-            FOV_Y * (1.0 + 0.07 * self.fov_kick),
+            FOV_Y * (1.0 + 0.07 * self.fov_kick) * self.gun.fov_scale(self.held_weapon()),
             aspect,
             reach + 64.0,
             reach * 0.55,
@@ -1276,6 +1403,7 @@ impl Game {
             grid: &self.grid,
             survival: &self.survival,
             flying: self.player.flying,
+            scoped: self.gun.scoped() && self.held_weapon().is_some(),
             held: self.held,
             mouse: self.mouse,
             debug: self.debug,
@@ -1381,8 +1509,10 @@ impl Game {
         } else {
             return;
         };
-        self.player.yaw -= dx * SENSITIVITY;
-        self.player.pitch -= dy * SENSITIVITY;
+        // Dürbünde görüş açısı daraldığı kadar fare de yavaşlar.
+        let sens = SENSITIVITY * self.gun.fov_scale(self.held_weapon()) as f64;
+        self.player.yaw -= dx * sens;
+        self.player.pitch -= dy * sens;
         let lim = std::f64::consts::FRAC_PI_2 - 0.001;
         self.player.pitch = self.player.pitch.clamp(-lim, lim);
     }
@@ -1406,6 +1536,7 @@ impl Game {
         if button == 0 {
             self.start_mining();
         } else if button == 2 {
+            self.aim_held = true;
             self.right_click();
         }
     }
@@ -1413,6 +1544,9 @@ impl Game {
     fn on_mouse_up(&mut self, e: &MouseEvent) {
         if e.button() == 0 {
             self.stop_mining();
+        }
+        if e.button() == 2 {
+            self.aim_held = false;
         }
         if !self.pointer_locked && self.dragging {
             if self.drag_moved < 6.0 {
@@ -1620,6 +1754,7 @@ pub fn debug_state_json() -> String {
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
                 "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
                 "\"mining\":{:.2},\"particles\":{},\"renderScale\":{:.2},",
+                "\"zoom\":{:.2},\"shots\":{},\"tracers\":{},",
                 "\"torches\":{},\"lights\":{},\"cars\":{},\"driving\":{},\"fishing\":\"{}\",",
                 "\"slots\":[{}]",
                 "}}"
@@ -1662,6 +1797,9 @@ pub fn debug_state_json() -> String {
             g.mining.progress,
             g.particles.list.len(),
             g.render_scale,
+            g.gun.zoom,
+            g.shots_fired,
+            g.tracers.len(),
             g.torches.len(),
             g.fx_lights.len(),
             g.cars.len(),
@@ -1740,6 +1878,10 @@ pub fn debug_break() {
 
 pub fn debug_set_time(t: f64) {
     with_game(|g| g.day_time = t.rem_euclid(1.0));
+}
+
+pub fn debug_set_aim(on: bool) {
+    with_game(|g| g.aim_held = on);
 }
 
 pub fn debug_hold_break(on: bool) {
@@ -1962,6 +2104,10 @@ pub fn start() -> Result<(), JsValue> {
         fx_boxes: Vec::new(),
         fx_lights: Vec::new(),
         fov_kick: 0.0,
+        gun: Gun::default(),
+        aim_held: false,
+        tracers: Vec::new(),
+        shots_fired: 0,
         walk_phase: 0.0,
         rod_swing: 0.0,
         day_time: START_TIME,
@@ -2065,6 +2211,7 @@ pub fn start() -> Result<(), JsValue> {
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
             if let Ok(mut game) = g.try_borrow_mut() {
                 game.keys.clear();
+                game.aim_held = false;
                 game.stop_mining();
                 game.dragging = false;
                 game.drag_button = -1;

@@ -164,15 +164,15 @@ async function main() {
   expect('tokken iyileşme: can 8\'den artar, 12\'yi geçmez', out.regenHealth > 8 && out.regenHealth <= 12,
     out.regenHealth);
 
-  // ---- 6) Yaratıcı mod: hasar yok, 17 yuva x64, uçuş açık ----
+  // ---- 6) Yaratıcı mod: hasar yok, 19 yuva x64, uçuş açık ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_mode(true); 1`);
   await sleep(200);
   let st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.creative = { mode: st.mode, flying: st.flying, slots: st.slots.filter(s => s).length, first: st.slots[0] };
   await evalJs(`window.__vcRs.debug_damage(10); 1`);
   out.creativeDamageIgnored = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health === 20;
-  expect('yaratıcı mod: uçuş açık, 17 yuva × 64',
-    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 17 &&
+  expect('yaratıcı mod: uçuş açık, 19 yuva × 64',
+    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 19 &&
       out.creative.first?.[0] === 1 && out.creative.first?.[1] === 64, out.creative);
   expect('yaratıcı modda hasar yok', out.creativeDamageIgnored);
 
@@ -292,6 +292,28 @@ async function main() {
     expect('araba: yere bırakılır ve binilir', mounted.cars === 1 && mounted.driving === true, out.car);
     expect('araba: gazla ilerler', dist > 2, out.car);
     expect('araba: R ile inilir', off.driving === false, out.car);
+    // Silahlar: tabanca ateş eder ve atış aralığına uyar; tüfek sağ tıkla yakınlaştırır.
+    await evalJs(`${v}.debug_set_slot(0, 105, 1); ${v}.debug_set_slot(2, 106, 1); ${v}.debug_select(0); ${v}.debug_set_look(1.0, -0.3); 1`);
+    await sleep(300);
+    const before = await state();
+    await evalJs(`${v}.debug_hold_break(true); ${v}.debug_hold_break(true); ${v}.debug_hold_break(false); 1`);
+    await sleep(60);
+    const shot = await state();
+    await evalJs(`${v}.debug_set_aim(true); 1`);
+    await sleep(700);
+    const pistolAim = await state();
+    await evalJs(`${v}.debug_select(2); 1`);
+    for (let i = 0; i < 60 && (await state()).zoom < 0.99; i++) await sleep(100);
+    const scoped = await state();
+    await evalJs(`${v}.debug_set_aim(false); 1`);
+    for (let i = 0; i < 60 && (await state()).zoom > 0.01; i++) await sleep(100);
+    const unscoped = await state();
+    out.guns = { shots: shot.shots - before.shots, kick: Number((shot.pitch - before.pitch).toFixed(3)),
+      pistolZoom: pistolAim.zoom, sniperZoom: scoped.zoom, after: unscoped.zoom };
+    expect('tabanca: tek atış (aralık dolmadan ikincisi yok) ve geri tepme', out.guns.shots === 1 && out.guns.kick > 0, out.guns);
+    expect('tabanca yakınlaştırmaz, tüfek yakınlaştırır', pistolAim.zoom === 0 && scoped.zoom >= 0.99, out.guns);
+    expect('nişan bırakılınca yakınlaştırma kapanır', unscoped.zoom <= 0.01, out.guns);
+
     // Sonraki adımlar başlangıç envanterini ve duran bir oyuncuyu bekler.
     await evalJs(`${v}.debug_set_slot(0, 1, 16); ${v}.debug_set_slot(2, 3, 24); ${v}.debug_select(8); 1`);
   }

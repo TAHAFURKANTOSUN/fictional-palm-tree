@@ -5,7 +5,7 @@
 //! Motor bilerek ikiye ayrılmıştır:
 //!
 //! * **Saf çekirdek** (`blocks`, `world`, `noise`, `mesh`, `atlas`, `raycast`,
-//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
+//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
 //!   API'si kullanmaz. `cargo test` ile tarayıcı olmadan doğrulanabilir.
 //! * **Tarayıcı katmanı** (`app`, `gl`, `hud`) — yalnızca `wasm32` hedefinde
 //!   derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
@@ -24,6 +24,7 @@ pub mod player;
 pub mod raycast;
 pub mod sky;
 pub mod vehicle;
+pub mod weapons;
 pub mod survival;
 pub mod world;
 
@@ -151,6 +152,13 @@ pub fn debug_teleport_to_water() -> bool {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn debug_add_item(id: u16, n: u32) {
     app::debug_add_item(id, n)
+}
+
+/// Dürbünlü tüfekte nişan almayı (sağ tık basılı) açar / kapatır.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_set_aim(on: bool) {
+    app::debug_set_aim(on)
 }
 
 #[cfg(target_arch = "wasm32")]

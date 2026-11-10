@@ -4,8 +4,8 @@
 //! konursa konsun, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
 
 use crate::blocks::{
-    CAR, COBBLE, CRAFT_TABLE, DIRT, FISHING_ROD, GRASS, LEAVES, LOG, PLANKS, SAND, STICK, STONE,
-    TORCH,
+    CAR, COBBLE, CRAFT_TABLE, DIRT, FISHING_ROD, GLASS, GRASS, LEAVES, LOG, PISTOL, PLANKS, SAND,
+    SNIPER, STICK, STONE, TORCH,
 };
 use crate::inventory::{Inventory, Stack, MAX_STACK};
 
@@ -24,7 +24,7 @@ pub struct Recipe {
     pub out: (u16, u8),
 }
 
-pub static RECIPES: [Recipe; 9] = [
+pub static RECIPES: [Recipe; 11] = [
     Recipe {
         id: "planks",
         kind: RecipeKind::Shapeless { inputs: &[LOG as u16] },
@@ -43,7 +43,7 @@ pub static RECIPES: [Recipe; 9] = [
     Recipe {
         id: "glass",
         kind: RecipeKind::Shapeless { inputs: &[SAND as u16, PLANKS as u16] },
-        out: (crate::blocks::GLASS as u16, 2),
+        out: (GLASS as u16, 2),
     },
     Recipe {
         id: "brick",
@@ -72,6 +72,22 @@ pub static RECIPES: [Recipe; 9] = [
             key: &[('P', PLANKS as u16), ('C', COBBLE as u16)],
         },
         out: (CAR, 1),
+    },
+    Recipe {
+        id: "pistol",
+        kind: RecipeKind::Shaped {
+            pattern: &["CC", " S"],
+            key: &[('C', COBBLE as u16), ('S', STICK)],
+        },
+        out: (PISTOL, 1),
+    },
+    Recipe {
+        id: "sniper",
+        kind: RecipeKind::Shaped {
+            pattern: &["CCC", " SG"],
+            key: &[('C', COBBLE as u16), ('S', STICK), ('G', GLASS as u16)],
+        },
+        out: (SNIPER, 1),
     },
 ];
 
@@ -320,7 +336,7 @@ pub fn take_result_into(grid: &mut Grid, held: &mut Option<Stack>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blocks::{AIR, BRICK, GLASS};
+    use crate::blocks::{AIR, BRICK};
     use crate::inventory::INV_SIZE;
 
     fn empty() -> Grid {
@@ -578,6 +594,24 @@ mod tests {
             put(&mut g, i, PLANKS as u16);
         }
         assert_eq!(find_recipe(&g).map(|r| r.id), Some("table"));
+    }
+
+    #[test]
+    fn gun_recipes_work() {
+        let mut g = empty();
+        for i in [0, 1] {
+            put(&mut g, i, COBBLE as u16);
+        }
+        put(&mut g, 4, STICK);
+        assert_eq!(craft_output(&g), Some((PISTOL, 1)));
+
+        let mut g = empty();
+        for i in [3, 4, 5] {
+            put(&mut g, i, COBBLE as u16);
+        }
+        put(&mut g, 7, STICK);
+        put(&mut g, 8, GLASS as u16);
+        assert_eq!(craft_output(&g), Some((SNIPER, 1)));
     }
 
     #[test]

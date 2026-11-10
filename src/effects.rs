@@ -147,6 +147,23 @@ impl Particles {
         }
     }
 
+    /// Mermi isabeti: bloğun dokusundan renk alan küçük bir kırıntı bulutu,
+    /// vurulan yüzeyden (`normal` yönünde) dışarı saçılır.
+    pub fn spawn_impact(&mut self, pos: [f64; 3], normal: [f64; 3], id: u8, atlas: &[u8]) {
+        let tile = block_def(id).side as usize;
+        for _ in 0..9 {
+            let px = (self.rand() * TILE as f64) as usize;
+            let py = (self.rand() * TILE as f64) as usize;
+            let o = (py * ATLAS_W + tile * TILE as usize + px) * 4;
+            let color = match atlas.get(o..o + 4) {
+                Some(c) if c[3] > 128 => [c[0], c[1], c[2]],
+                _ => [200, 200, 200],
+            };
+            let vel = [normal[0] * 2.5, normal[1] * 2.5 + 1.2, normal[2] * 2.5];
+            self.puff(pos, vel, 3.0, color, 0.4, 0.05, 1.0);
+        }
+    }
+
     /// Tek bir serbest parçacık (duman, kıvılcım, su damlası) ekler; hıza
     /// küçük bir rastgele sapma katılır.
     pub fn puff(&mut self, pos: [f64; 3], vel: [f64; 3], spread: f64, color: [u8; 3], life: f64, size: f32, gravity: f32) {

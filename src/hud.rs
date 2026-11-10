@@ -64,6 +64,8 @@ pub struct HudFrame<'a> {
     pub grid: &'a Grid,
     pub survival: &'a Survival,
     pub flying: bool,
+    /// Dürbünden bakılıyor: siyah çerçeve ve nişan çizgileri çizilir.
+    pub scoped: bool,
     /// Envanter ekranında fareyle taşınan yığın.
     pub held: Option<Stack>,
     pub mouse: (f64, f64),
@@ -101,6 +103,7 @@ struct HudKey {
     cursor: (i32, i32),
     creative: bool,
     flying: bool,
+    scoped: bool,
     dead: bool,
     health: i32,
     hunger: i32,
@@ -224,6 +227,7 @@ impl Hud {
             },
             creative: s.is_creative(),
             flying: f.flying,
+            scoped: f.scoped,
             dead: s.dead,
             health: s.health,
             hunger: s.hunger,
@@ -455,6 +459,24 @@ impl Hud {
                 ctx.set_fill_style_str("#10202a");
                 ctx.fill_rect(x + size * 0.62, y + size * 0.40, size * 0.08, size * 0.08);
             }
+            Icon::Tabanca => {
+                ctx.set_fill_style_str("#3c4048");
+                ctx.fill_rect(x + size * 0.14, y + size * 0.32, size * 0.70, size * 0.18);
+                ctx.set_fill_style_str("#6b4a2a");
+                ctx.fill_rect(x + size * 0.18, y + size * 0.48, size * 0.18, size * 0.34);
+                ctx.set_fill_style_str("#23262b");
+                ctx.fill_rect(x + size * 0.40, y + size * 0.50, size * 0.12, size * 0.10);
+            }
+            Icon::Tufek => {
+                ctx.set_fill_style_str("#3c4048");
+                ctx.fill_rect(x + size * 0.04, y + size * 0.46, size * 0.92, size * 0.12);
+                ctx.set_fill_style_str("#6b4a2a");
+                ctx.fill_rect(x + size * 0.04, y + size * 0.50, size * 0.26, size * 0.22);
+                ctx.set_fill_style_str("#1a1c20");
+                ctx.fill_rect(x + size * 0.36, y + size * 0.28, size * 0.36, size * 0.12);
+                ctx.set_fill_style_str("#8fd3f0");
+                ctx.fill_rect(x + size * 0.70, y + size * 0.30, size * 0.05, size * 0.08);
+            }
             Icon::Araba => {
                 ctx.set_fill_style_str("#c8382c");
                 ctx.fill_rect(x + size * 0.06, y + size * 0.46, size * 0.88, size * 0.26);
@@ -642,6 +664,30 @@ impl Hud {
         ctx.fill_rect(cx + 3.0, cy - 1.0, 7.0, 2.0);
     }
 
+    /// Dürbün görüntüsü: ortada yuvarlak açıklık, çevresi siyah, ince nişan çizgileri.
+    fn draw_scope(&self) {
+        let ctx = &self.ctx;
+        let (w, h) = (self.width, self.height);
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        let r = h * 0.44;
+        ctx.set_fill_style_str("#000000");
+        ctx.fill_rect(0.0, 0.0, (cx - r).max(0.0), h);
+        ctx.fill_rect(cx + r, 0.0, (w - cx - r).max(0.0), h);
+        // Açıklığın çevresi: köşeleri de örtecek kalınlıkta bir halka.
+        let ring = r * 0.9;
+        ctx.set_stroke_style_str("#000000");
+        ctx.set_line_width(ring);
+        ctx.begin_path();
+        let _ = ctx.arc(cx, cy, r + ring / 2.0, 0.0, std::f64::consts::TAU);
+        ctx.stroke();
+        // Nişan çizgileri: kenarlarda kalın, ortada ince.
+        ctx.fill_rect(cx - r, cy - 1.5, r * 0.72, 3.0);
+        ctx.fill_rect(cx + r * 0.28, cy - 1.5, r * 0.72, 3.0);
+        ctx.fill_rect(cx - 1.5, cy + r * 0.28, 3.0, r * 0.72);
+        ctx.fill_rect(cx - r * 0.28, cy - 0.5, r * 0.56, 1.0);
+        ctx.fill_rect(cx - 0.5, cy - r * 0.28, 1.0, r * 0.56);
+    }
+
     fn draw_toast(&self) {
         let Some((text, life)) = self.toast.as_ref() else { return };
         let alpha = Self::toast_alpha(*life);
@@ -731,6 +777,9 @@ impl Hud {
 
         if f.inv_open {
             self.draw_inventory(inv, f.grid, &l);
+        } else if f.scoped {
+            self.draw_scope();
+            self.draw_toast();
         } else {
             if f.hud_visible {
                 self.draw_crosshair();

@@ -28,6 +28,8 @@ pub const APPLE: u16 = 101;
 pub const FISHING_ROD: u16 = 102;
 pub const FISH: u16 = 103;
 pub const CAR: u16 = 104;
+pub const PISTOL: u16 = 105;
+pub const SNIPER: u16 = 106;
 
 /// Doku atlasındaki döşeme indeksleri.
 pub const T_GRASS_TOP: u8 = 0;
@@ -164,6 +166,8 @@ pub enum Icon {
     Olta,
     Balik,
     Araba,
+    Tabanca,
+    Tufek,
 }
 
 /// Eşya tanımı (bloklar ve yalnızca eşya olanlar için ortak).
@@ -189,6 +193,8 @@ pub fn item_def(id: u16) -> Option<ItemDef> {
             FISHING_ROD => Some(ItemDef { name: "Olta", icon: Icon::Olta, placeable: None, food: 0 }),
             FISH => Some(ItemDef { name: "Balık", icon: Icon::Balik, placeable: None, food: 5 }),
             CAR => Some(ItemDef { name: "Araba", icon: Icon::Araba, placeable: None, food: 0 }),
+            PISTOL => Some(ItemDef { name: "Tabanca", icon: Icon::Tabanca, placeable: None, food: 0 }),
+            SNIPER => Some(ItemDef { name: "Dürbünlü Tüfek", icon: Icon::Tufek, placeable: None, food: 0 }),
             _ => None,
         }
     }
