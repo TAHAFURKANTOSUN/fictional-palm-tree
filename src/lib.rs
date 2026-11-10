@@ -5,7 +5,7 @@
 //! Motor bilerek ikiye ayrılmıştır:
 //!
 //! * **Saf çekirdek** (`blocks`, `world`, `noise`, `mesh`, `atlas`, `raycast`,
-//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
+//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
 //!   API'si kullanmaz. `cargo test` ile tarayıcı olmadan doğrulanabilir.
 //! * **Tarayıcı katmanı** (`app`, `gl`, `hud`) — yalnızca `wasm32` hedefinde
 //!   derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
@@ -18,6 +18,7 @@ pub mod fishing;
 pub mod inventory;
 pub mod mat4;
 pub mod mesh;
+pub mod mobs;
 pub mod noise;
 pub mod pacing;
 pub mod player;
@@ -152,6 +153,13 @@ pub fn debug_teleport_to_water() -> bool {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn debug_add_item(id: u16, n: u32) {
     app::debug_add_item(id, n)
+}
+
+/// Oyuncunun 4 blok önüne bir canlı koyar: 0 koyun, 1 domuz, 2 tavuk, 3 zombi.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_spawn_mob(kind: u8) {
+    app::debug_spawn_mob(kind)
 }
 
 /// Dürbünlü tüfekte nişan almayı (sağ tık basılı) açar / kapatır.

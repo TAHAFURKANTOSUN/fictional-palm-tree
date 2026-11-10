@@ -6,6 +6,8 @@ use crate::blocks::{GLASS, LEAVES, PISTOL, SNIPER, TORCH};
 pub struct Weapon {
     /// İki atış arasındaki en kısa süre (saniye).
     pub interval: f64,
+    /// Bir canlıya verdiği hasar.
+    pub damage: i32,
     /// Merminin menzili (blok).
     pub range: f64,
     /// Atışta kameranın yukarı sıçraması (radyan).
@@ -14,8 +16,8 @@ pub struct Weapon {
     pub zoom_fov: f32,
 }
 
-const PISTOL_STATS: Weapon = Weapon { interval: 0.22, range: 70.0, kick: 0.014, zoom_fov: 1.0 };
-const SNIPER_STATS: Weapon = Weapon { interval: 1.1, range: 150.0, kick: 0.04, zoom_fov: 0.22 };
+const PISTOL_STATS: Weapon = Weapon { interval: 0.22, damage: 5, range: 70.0, kick: 0.014, zoom_fov: 1.0 };
+const SNIPER_STATS: Weapon = Weapon { interval: 1.1, damage: 20, range: 150.0, kick: 0.04, zoom_fov: 0.22 };
 
 /// Eşya bir silahsa özelliklerini döndürür.
 pub fn weapon(id: u16) -> Option<&'static Weapon> {

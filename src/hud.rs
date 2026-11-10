@@ -459,6 +459,16 @@ impl Hud {
                 ctx.set_fill_style_str("#10202a");
                 ctx.fill_rect(x + size * 0.62, y + size * 0.40, size * 0.08, size * 0.08);
             }
+            Icon::Et => {
+                ctx.set_fill_style_str("#c2584c");
+                ctx.fill_rect(x + size * 0.18, y + size * 0.26, size * 0.56, size * 0.44);
+                ctx.fill_rect(x + size * 0.28, y + size * 0.18, size * 0.36, size * 0.60);
+                ctx.set_fill_style_str("#e8a79a");
+                ctx.fill_rect(x + size * 0.30, y + size * 0.34, size * 0.20, size * 0.16);
+                ctx.set_fill_style_str("#f1ead8");
+                ctx.fill_rect(x + size * 0.70, y + size * 0.62, size * 0.20, size * 0.10);
+                ctx.fill_rect(x + size * 0.84, y + size * 0.56, size * 0.08, size * 0.22);
+            }
             Icon::Tabanca => {
                 ctx.set_fill_style_str("#3c4048");
                 ctx.fill_rect(x + size * 0.14, y + size * 0.32, size * 0.70, size * 0.18);

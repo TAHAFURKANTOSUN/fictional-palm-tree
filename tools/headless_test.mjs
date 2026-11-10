@@ -164,15 +164,15 @@ async function main() {
   expect('tokken iyileşme: can 8\'den artar, 12\'yi geçmez', out.regenHealth > 8 && out.regenHealth <= 12,
     out.regenHealth);
 
-  // ---- 6) Yaratıcı mod: hasar yok, 19 yuva x64, uçuş açık ----
+  // ---- 6) Yaratıcı mod: hasar yok, 20 yuva x64, uçuş açık ----
   await evalJs(`window.__vcRs.debug_set_health(20); window.__vcRs.debug_set_mode(true); 1`);
   await sleep(200);
   let st = JSON.parse(await evalJs(`window.__vcRs.debug_state()`));
   out.creative = { mode: st.mode, flying: st.flying, slots: st.slots.filter(s => s).length, first: st.slots[0] };
   await evalJs(`window.__vcRs.debug_damage(10); 1`);
   out.creativeDamageIgnored = JSON.parse(await evalJs(`window.__vcRs.debug_state()`)).health === 20;
-  expect('yaratıcı mod: uçuş açık, 19 yuva × 64',
-    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 19 &&
+  expect('yaratıcı mod: uçuş açık, 20 yuva × 64',
+    out.creative.mode === 'Yaratıcı' && out.creative.flying === true && out.creative.slots === 20 &&
       out.creative.first?.[0] === 1 && out.creative.first?.[1] === 64, out.creative);
   expect('yaratıcı modda hasar yok', out.creativeDamageIgnored);
 
@@ -313,6 +313,41 @@ async function main() {
     expect('tabanca: tek atış (aralık dolmadan ikincisi yok) ve geri tepme', out.guns.shots === 1 && out.guns.kick > 0, out.guns);
     expect('tabanca yakınlaştırmaz, tüfek yakınlaştırır', pistolAim.zoom === 0 && scoped.zoom >= 0.99, out.guns);
     expect('nişan bırakılınca yakınlaştırma kapanır', unscoped.zoom <= 0.01, out.guns);
+
+    // Canlılar: vurulan hayvan koşarak kaçar; zombi oyuncuyu koşarak kovalar.
+    {
+      await evalJs(`${v}.debug_select(0); 1`);
+      let fled = null;
+      for (let i = 0; i < 8 && !fled; i++) {
+        await evalJs(`${v}.debug_set_look(${1.0 + i * 0.8}, -0.25); ${v}.debug_spawn_mob(0); 1`);
+        await sleep(450);
+        // Doğrudan koyunun gövdesine nişan al (gezindiği için yeri değişir).
+        const s = await state();
+        const sheep = s.mobs.filter(m => m[0] === 'Koyun').pop();
+        if (!sheep) continue;
+        const [dx, dy, dz] = [sheep[4] - s.pos[0], sheep[5] + 0.6 - (s.pos[1] + 1.62), sheep[6] - s.pos[2]];
+        await evalJs(`${v}.debug_set_look(${Math.atan2(-dx, -dz)}, ${Math.atan2(dy, Math.hypot(dx, dz))}); ${v}.debug_hold_break(true); ${v}.debug_hold_break(false); 1`);
+        await sleep(350);
+        fled = (await state()).mobs.find(m => m[0] === 'Koyun' && m[2] < 8) || null;
+      }
+      await evalJs(`${v}.debug_set_mode(true); ${v}.debug_set_time(0.85); ${v}.debug_spawn_mob(3); 1`);
+      let chasing = null;
+      for (let i = 0; i < 40 && !chasing; i++) {
+        await sleep(100);
+        chasing = (await state()).mobs.find(m => m[0] === 'Zombi' && m[1] === 'Run') || null;
+      }
+      const wandering = (await state()).mobs.filter(m => m[1] === 'Idle' || m[1] === 'Walk').length;
+      await evalJs(`${v}.debug_set_time(0.3); 1`);
+      let burned = false;
+      // Yanma oyun zamanıyla ilerler; yavaş makinede uzun sürebilir.
+      for (let i = 0; i < 600 && !burned; i++) { await sleep(100); burned = !(await state()).mobs.some(m => m[0] === 'Zombi'); }
+      await evalJs(`${v}.debug_set_mode(false); 1`);
+      await sleep(300);
+      out.mobs = { fled, chasing, wandering, burned };
+      expect('vurulan koyun hasar alır ve koşarak kaçar', fled && fled[1] === 'Run' && fled[2] === 3, out.mobs);
+      expect('zombi oyuncuyu koşarak kovalar', !!chasing, out.mobs);
+      expect('zombi gündüz yanar', burned, out.mobs);
+    }
 
     // Sonraki adımlar başlangıç envanterini ve duran bir oyuncuyu bekler.
     await evalJs(`${v}.debug_set_slot(0, 1, 16); ${v}.debug_set_slot(2, 3, 24); ${v}.debug_select(8); 1`);

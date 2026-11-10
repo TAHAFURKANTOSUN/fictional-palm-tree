@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-167%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-174%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -57,6 +57,9 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   Kamış savrulur, şamandıra yay çizerek uçar, misina ve su sıçraması çizilir.
 - 🚗 **Araba** — üret, yere bırak, <kbd>R</kbd> ile bin; tek blokluk basamakları çıkar.
   Tekerlekler döner, öndekiler direksiyonla kırılır; egzoz dumanı ve toz çıkar.
+- 🐑 **Hayvanlar ve yaratıklar** — koyun, domuz, tavuk çimenlerde gezinir
+  (durur, yürür); vurulunca koşarak kaçar ve et bırakır. Gece çıkan zombi
+  oyuncuyu görünce koşarak kovalar; gündüz yanar.
 - 🔫 **Silahlar** — dürbünsüz tabanca ve sağ tıkla yakınlaştıran dürbünlü
   tüfek; namlu alevi, geri tepme, mermi izi ve isabet kırıntıları. Cam, yaprak
   ve meşaleyi parçalar.
@@ -66,7 +69,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **167 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **174 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -122,6 +125,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 | Fare | Etrafa bak |
 | Sol Tık (basılı tut) | Blok kır — sertliğe göre süre alır, yaratıcıda anında |
 | Sol Tık (silah elde) | Ateş et |
+| Sol Tık (canlıya bakarken) | Yumruk at |
 | Sağ Tık (tüfek elde, basılı) | Dürbünle yakınlaştır |
 | Sağ Tık | Blok koy / ye / oltayı at-çek / arabayı bırak |
 | <kbd>E</kbd> | Envanter & çalışma tezgahı |
@@ -150,7 +154,7 @@ sunucu gerekmez. (Üretimi: [`tools/build_single_file.mjs`](tools/build_single_f
 - **Yemek** — yapraklar %14 olasılıkla 🍎 **elma** düşürür; sağ tıkla ye
   (+6 açlık).
 - **Yaratıcı mod** (<kbd>G</kbd>) — can/açlık devre dışı, uçuş açık, envanter
-  19 çeşit blok ve eşyanın 64'lük paletiyle dolar, koymak hiçbir şey harcamaz. Hayatta
+  20 çeşit blok ve eşyanın 64'lük paletiyle dolar, koymak hiçbir şey harcamaz. Hayatta
   kalmaya dönünce önceki envanterin aynen geri gelir.
 
 ### 🛠️ Craft tarifleri
@@ -182,7 +186,7 @@ Motor bilerek iki katmana ayrıldı:
 
 | Katman | Modüller | Özellik |
 |---|---|---|
-| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
+| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
 | **Tarayıcı katmanı** | `app`, `gl`, `hud` | Yalnızca `wasm32` hedefinde derlenir (`#[cfg(target_arch = "wasm32")]`) |
 
 Bu ayrım sayesinde oyunun **tüm kuralları** (arazi sürekliliği, mesh üretimi,
@@ -277,6 +281,7 @@ voxelcraft-rs/
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
 │   ├── effects.rs        # kazma ilerlemesi + kırılma parçacıkları
 │   ├── fishing.rs        # olta: şamandıra, bekleme, balığın vurması
+│   ├── mobs.rs           # hayvanlar ve zombi: gezinme, kaçma, kovalama
 │   ├── weapons.rs        # silahlar: atış aralığı, geri tepme, dürbün
 │   ├── vehicle.rs        # araba fiziği (gaz, direksiyon, basamak çıkma)
 │   ├── sky.rs            # gündüz–gece döngüsü (renkler, güneş, ışık)
@@ -296,7 +301,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 167 test
+cargo test --lib          # 174 test
 ```
 
 <details>

@@ -13,7 +13,7 @@ use web_sys::{
     Window,
 };
 
-use crate::blocks::{item_def, item_name, APPLE, CAR, FISH, FISHING_ROD, TORCH};
+use crate::blocks::{item_def, item_name, APPLE, CAR, FISH, FISHING_ROD, MEAT, TORCH};
 use crate::crafting::{self, FillError, Grid};
 use crate::effects::{BoxInst, Mining, Particles};
 use crate::fishing::{find_water, Fishing, Phase, CAST_RANGE};
@@ -23,6 +23,7 @@ use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
 use crate::mesh::{self, MeshBuffers};
+use crate::mobs::{Kind, MobEvent, Mobs, State};
 use crate::pacing::QualityGovernor;
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
@@ -122,6 +123,8 @@ struct Game {
     fx_lights: Vec<[f32; 4]>,
     /// Koşarken görüş açısının yumuşakça genişlemesi (0..1).
     fov_kick: f32,
+    mobs: Mobs,
+    mob_events: Vec<MobEvent>,
     gun: Gun,
     /// Sağ tık basılı (dürbünlü silahta nişan).
     aim_held: bool,
@@ -399,6 +402,13 @@ impl Game {
             self.fire(w);
             return;
         }
+        // Yakındaki bir canlıya bakılıyorsa yumruk atılır (blok kazılmaz).
+        let (eye, d) = (self.player.eye(), self.player.look_dir());
+        let wall = self.block_ray(REACH).map(|b| b.2).unwrap_or(f64::MAX);
+        if let Some((i, t)) = self.mobs.ray_hit(eye, d, 3.2).filter(|&(_, t)| t < wall) {
+            self.hit_mob(i, 2, [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t]);
+            return;
+        }
         self.mining_held = true;
         self.creative_break_cd = 0.0;
         if self.target().is_some_and(|h| h.y <= 0) {
@@ -450,6 +460,50 @@ impl Game {
         self.hand_point(0.24, -0.2, if long { 1.02 } else { 0.72 })
     }
 
+    /// Bakış doğrultusundaki ilk blok: `(isabet, yüzeydeki nokta, uzaklık)`.
+    fn block_ray(&self, range: f64) -> Option<(crate::raycast::Hit, [f64; 3], f64)> {
+        let (eye, d) = (self.player.eye(), self.player.look_dir());
+        let hit = raycast_voxel(&self.world, eye[0], eye[1], eye[2], d[0], d[1], d[2], range)?;
+        let (block, n) = ([hit.x, hit.y, hit.z], [hit.nx, hit.ny, hit.nz]);
+        let a = (0..3).find(|&a| n[a] != 0)?;
+        let plane = block[a] as f64 + if n[a] > 0 { 1.0 } else { 0.0 };
+        let t = (plane - eye[a]) / d[a];
+        Some((hit, [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t], t))
+    }
+
+    /// Bir canlıya hasar verir: geri savrulur, hayvansa kaçmaya başlar.
+    fn hit_mob(&mut self, i: usize, damage: i32, at: [f64; 3]) {
+        let from = self.player.pos;
+        self.mobs.list[i].damage(damage, from);
+        for _ in 0..7 {
+            self.particles.puff(at, [0.0, 1.5, 0.0], 3.0, [170, 30, 30], 0.35, 0.05, 1.0);
+        }
+    }
+
+    /// Canlıları ilerletir ve olanları (saldırı, ölüm) oyuna uygular.
+    fn update_mobs(&mut self, dt: f64) {
+        let night = sky_state(self.day_time).light < 0.5;
+        let mut events = std::mem::take(&mut self.mob_events);
+        events.clear();
+        self.mobs.tick(&self.world, dt, self.player.pos, night, &mut events);
+        for ev in events.iter() {
+            match *ev {
+                MobEvent::Attack(damage) => self.survival.damage(damage, "zombi"),
+                MobEvent::Died(kind, pos) => {
+                    let stats = kind.stats();
+                    let color = if kind == Kind::Zombie { [70, 120, 70] } else { [230, 225, 215] };
+                    for _ in 0..16 {
+                        self.particles.puff([pos[0], pos[1] + stats.height * 0.5, pos[2]], [0.0, 2.0, 0.0], 3.5, color, 0.6, 0.08, 0.6);
+                    }
+                    if stats.meat > 0 && !self.survival.is_creative() && self.inv.add(MEAT, stats.meat) < stats.meat {
+                        self.hud.toast("+Et");
+                    }
+                }
+            }
+        }
+        self.mob_events = events;
+    }
+
     /// Ateş: mermi anında gider (ışın). İsabet ettiği bloktan kırıntı saçar,
     /// kırılgan blokları (cam, yaprak, meşale) parçalar.
     fn fire(&mut self, w: &'static Weapon) {
@@ -461,16 +515,15 @@ impl Game {
         let from = if self.gun.scoped() { eye } else { self.muzzle(w) };
         let mut end = [eye[0] + d[0] * w.range, eye[1] + d[1] * w.range, eye[2] + d[2] * w.range];
 
-        if let Some(hit) = raycast_voxel(&self.world, eye[0], eye[1], eye[2], d[0], d[1], d[2], w.range) {
-            // Vurulan yüzün düzlemiyle kesişim noktası.
-            let (block, n) = ([hit.x, hit.y, hit.z], [hit.nx, hit.ny, hit.nz]);
-            if let Some(a) = (0..3).find(|&a| n[a] != 0) {
-                let plane = block[a] as f64 + if n[a] > 0 { 1.0 } else { 0.0 };
-                let t = (plane - eye[a]) / d[a];
-                end = [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t];
-            }
+        let block = self.block_ray(w.range);
+        let mob = self.mobs.ray_hit(eye, d, w.range).filter(|&(_, t)| block.as_ref().is_none_or(|b| t < b.2));
+        if let Some((i, t)) = mob {
+            end = [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t];
+            self.hit_mob(i, w.damage, end);
+        } else if let Some((hit, point, _)) = block {
+            end = point;
             let id = self.world.get_block(hit.x, hit.y, hit.z);
-            let normal = [n[0] as f64, n[1] as f64, n[2] as f64];
+            let normal = [hit.nx as f64, hit.ny as f64, hit.nz as f64];
             let out = [end[0] + normal[0] * 0.04, end[1] + normal[1] * 0.04, end[2] + normal[2] * 0.04];
             self.particles.spawn_impact(out, normal, id, &self.atlas_pixels);
             if shatters(id) && hit.y > 0 {
@@ -892,6 +945,83 @@ impl Game {
             }
         }
 
+        // Hayvanlar ve yaratıklar: gövde, baş ve yürüyüşle sallanan bacaklar.
+        for m in self.mobs.list.iter() {
+            let p = m.body.pos;
+            if (p[0] - cam[0]).powi(2) + (p[2] - cam[2]).powi(2) > 72.0 * 72.0 {
+                continue;
+            }
+            let yaw = m.yaw as f32;
+            let f = m.forward();
+            let right = [-f[1], f[0]];
+            let hurt = m.hurt as f32 * 0.6;
+            let tint = |c: [u8; 3]| {
+                let mix = |a: u8, b: f32| (a as f32 + (b - a as f32) * hurt) as u8;
+                [mix(c[0], 255.0), mix(c[1], 60.0), mix(c[2], 60.0)]
+            };
+            let running = m.state == State::Run;
+            let idle = m.state == State::Idle;
+            // Bacak salınımı kat edilen yolla ilerler: koşarken daha geniş ve hızlı.
+            let stride = if running { 0.95 } else { 0.5 } * (m.speed / 0.6).min(1.0) as f32;
+            let swing = (m.anim * if running { 4.2 } else { 6.0 }).sin() as f32 * stride;
+            // Boşta: nefes alıp verir, başını sağa sola çevirir.
+            let bob = if idle { (m.idle_time * 2.2).sin() * 0.012 } else { (m.anim * 8.0).sin().abs() * 0.03 };
+            let look = if idle { ((m.idle_time * 0.8).sin() * 0.6) as f32 } else { 0.0 };
+            let lean = if running { -0.14 } else { 0.0 };
+            let at = |r: f64, u: f64, fw: f64| [p[0] + right[0] * r + f[0] * fw, p[1] + u + bob, p[2] + right[1] * r + f[1] * fw];
+            let mut add = |center: [f64; 3], half: [f32; 3], yaw: f32, pitch: f32, color: [u8; 3]| {
+                boxes.push(BoxInst { center, half, yaw, pitch, color: tint(color), glow: false });
+            };
+            // Kalçadan (ya da omuzdan) sarkan uzuv: `angle` kadar öne/arkaya savrulur.
+            let limb = |r: f64, hip: f64, fw: f64, len: f64, w: f32, angle: f32| {
+                let a = angle as f64;
+                (at(r, hip - a.cos() * len * 0.5, fw + a.sin() * len * 0.5), [w, len as f32 * 0.5, w], angle)
+            };
+            match m.kind {
+                Kind::Sheep | Kind::Pig => {
+                    let sheep = m.kind == Kind::Sheep;
+                    let (body, head, legs) = if sheep { ([236, 236, 228], [84, 72, 66], [70, 60, 56]) } else { ([238, 164, 164], [228, 148, 150], [214, 134, 138]) };
+                    let (by, bh, leg) = if sheep { (0.74, 0.3, 0.46) } else { (0.54, 0.24, 0.32) };
+                    add(at(0.0, by, 0.0), [0.34, bh as f32, 0.52], yaw, lean, body);
+                    add(at(0.0, by + 0.16, 0.62), [0.2, 0.2, 0.19], yaw + look, lean, head);
+                    if !sheep {
+                        add(at(0.0, by + 0.1, 0.83), [0.1, 0.07, 0.04], yaw + look, 0.0, [200, 110, 120]);
+                    }
+                    for (r, fw, sign) in [(-0.2, 0.36, 1.0), (0.2, 0.36, -1.0), (-0.2, -0.36, -1.0), (0.2, -0.36, 1.0)] {
+                        let (c, h, a) = limb(r, leg, fw, leg, 0.085, swing * sign);
+                        add(c, h, yaw, a, legs);
+                    }
+                }
+                Kind::Chicken => {
+                    // Boştayken ara sıra yeri gagalar.
+                    let peck = if idle { ((m.idle_time * 3.0).sin().max(0.0) * 0.9) as f32 } else { 0.0 };
+                    add(at(0.0, 0.38, 0.0), [0.15, 0.15, 0.22], yaw, lean, [245, 245, 240]);
+                    add(at(0.0, 0.58 - peck as f64 * 0.16, 0.2 + peck as f64 * 0.06), [0.09, 0.11, 0.09], yaw + look, -peck, [245, 245, 240]);
+                    add(at(0.0, 0.56 - peck as f64 * 0.2, 0.32 + peck as f64 * 0.06), [0.04, 0.03, 0.05], yaw + look, -peck, [240, 190, 60]);
+                    add(at(0.0, 0.71 - peck as f64 * 0.14, 0.2), [0.03, 0.04, 0.06], yaw + look, -peck, [210, 50, 50]);
+                    for (r, sign) in [(-0.08, 1.0), (0.08, -1.0)] {
+                        let (c, h, a) = limb(r, 0.24, 0.0, 0.24, 0.03, swing * sign);
+                        add(c, h, yaw, a, [240, 190, 60]);
+                    }
+                }
+                Kind::Zombie => {
+                    let (skin, shirt, pants) = ([86, 150, 86], [50, 122, 142], [58, 60, 120]);
+                    add(at(0.0, 1.12, 0.0), [0.25, 0.37, 0.13], yaw, lean, shirt);
+                    add(at(0.0, 1.69, 0.0), [0.2, 0.2, 0.2], yaw + look, 0.0, skin);
+                    for (r, sign) in [(-0.13, 1.0), (0.13, -1.0)] {
+                        let (c, h, a) = limb(r, 0.75, 0.0, 0.75, 0.11, swing * sign);
+                        add(c, h, yaw, a, pants);
+                    }
+                    // Kovalarken kollar öne uzanır; gezinirken bacakların tersine sallanır.
+                    for (r, sign) in [(-0.36, -1.0), (0.36, 1.0)] {
+                        let angle = if running { 1.45 + (m.anim * 5.0).sin() as f32 * 0.1 * sign } else { swing * sign * 0.8 };
+                        let (c, h, a) = limb(r, 1.42, 0.0, 0.7, 0.09, angle);
+                        add(c, h, yaw, a, skin);
+                    }
+                }
+            }
+        }
+
         // Elde silah: geri tepmeyle geri kayıp namlusu kalkar. Dürbünden
         // bakarken model çizilmez.
         if let Some(w) = held.and_then(weapon).filter(|_| !self.gun.scoped()) {
@@ -1080,7 +1210,7 @@ impl Game {
                     };
                     self.hud.toast(msg);
                 }
-                Event::Ate => self.hud.toast("Elma yedin"),
+                Event::Ate => self.hud.toast("Afiyet olsun"),
                 Event::NotHungry => self.hud.toast("Tokum — aç değilim"),
                 Event::NoFood => self.hud.toast("Elinde yemek yok"),
                 Event::Healed | Event::Starving => {}
@@ -1132,6 +1262,7 @@ impl Game {
         self.update_fishing(dt);
         self.update_animations(dt);
         self.update_weapons(dt);
+        self.update_mobs(dt);
         self.update_mining(dt);
         self.particles.update(dt, &self.world);
         self.update_survival(dt);
@@ -1754,7 +1885,7 @@ pub fn debug_state_json() -> String {
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
                 "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
                 "\"mining\":{:.2},\"particles\":{},\"renderScale\":{:.2},",
-                "\"zoom\":{:.2},\"shots\":{},\"tracers\":{},",
+                "\"zoom\":{:.2},\"shots\":{},\"tracers\":{},\"mobs\":[{}],",
                 "\"torches\":{},\"lights\":{},\"cars\":{},\"driving\":{},\"fishing\":\"{}\",",
                 "\"slots\":[{}]",
                 "}}"
@@ -1800,6 +1931,19 @@ pub fn debug_state_json() -> String {
             g.gun.zoom,
             g.shots_fired,
             g.tracers.len(),
+            g.mobs
+                .list
+                .iter()
+                .take(16)
+                .map(|m| {
+                    let p = m.body.pos;
+                    format!(
+                        "[\"{}\",\"{:?}\",{},{:.1},{:.2},{:.2},{:.2}]",
+                        m.kind.stats().name, m.state, m.health, m.speed, p[0], p[1], p[2]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
             g.torches.len(),
             g.fx_lights.len(),
             g.cars.len(),
@@ -1878,6 +2022,15 @@ pub fn debug_break() {
 
 pub fn debug_set_time(t: f64) {
     with_game(|g| g.day_time = t.rem_euclid(1.0));
+}
+
+pub fn debug_spawn_mob(kind: u8) {
+    with_game(|g| {
+        let kind = [Kind::Sheep, Kind::Pig, Kind::Chicken, Kind::Zombie][kind as usize % 4];
+        let (f, _) = g.player.basis();
+        let p = g.player.pos;
+        g.mobs.spawn(kind, [p[0] + f[0] * 4.0, p[1] + 1.2, p[2] + f[1] * 4.0]);
+    });
 }
 
 pub fn debug_set_aim(on: bool) {
@@ -2104,6 +2257,8 @@ pub fn start() -> Result<(), JsValue> {
         fx_boxes: Vec::new(),
         fx_lights: Vec::new(),
         fov_kick: 0.0,
+        mobs: Mobs::default(),
+        mob_events: Vec::new(),
         gun: Gun::default(),
         aim_held: false,
         tracers: Vec::new(),
