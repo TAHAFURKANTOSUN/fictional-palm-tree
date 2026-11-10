@@ -203,6 +203,44 @@ pub fn item_def(id: u16) -> Option<ItemDef> {
     }
 }
 
+/// Eşyanın `ad_alanı:yol` biçimindeki kalıcı kimliği (ağ protokolü ve kayıt
+/// için). Minecraft'ta karşılığı olanlar onun adını taşır; bu oyuna özel
+/// olanlar `voxelcraft` ad alanındadır. Sayısal kimlikler sürümden sürüme
+/// kayabilir, bu adlar kaymaz.
+pub fn item_identifier(id: u16) -> Option<&'static str> {
+    Some(match id {
+        0 => "minecraft:air",
+        1 => "minecraft:grass_block",
+        2 => "minecraft:dirt",
+        3 => "minecraft:stone",
+        4 => "minecraft:cobblestone",
+        5 => "minecraft:sand",
+        6 => "minecraft:oak_log",
+        7 => "minecraft:oak_leaves",
+        8 => "minecraft:oak_planks",
+        9 => "minecraft:bricks",
+        10 => "minecraft:glass",
+        11 => "minecraft:water",
+        12 => "minecraft:bedrock",
+        13 => "minecraft:crafting_table",
+        14 => "minecraft:torch",
+        STICK => "minecraft:stick",
+        APPLE => "minecraft:apple",
+        FISHING_ROD => "minecraft:fishing_rod",
+        FISH => "minecraft:cod",
+        CAR => "voxelcraft:car",
+        PISTOL => "voxelcraft:pistol",
+        SNIPER => "voxelcraft:scoped_rifle",
+        MEAT => "voxelcraft:meat",
+        _ => return None,
+    })
+}
+
+/// [`item_identifier`]'ın tersi.
+pub fn item_from_identifier(name: &str) -> Option<u16> {
+    (0..=MEAT).find(|&id| item_identifier(id) == Some(name))
+}
+
 /// Kullanıcıya gösterilen eşya adı.
 pub fn item_name(id: u16) -> &'static str {
     item_def(id).map(|d| d.name).unwrap_or("?")
@@ -279,6 +317,26 @@ mod tests {
         for id in [FISHING_ROD, FISH, CAR] {
             assert_eq!(item_def(id).unwrap().placeable, None);
         }
+    }
+
+    /// Her eşyanın geçerli, benzersiz ve geri çevrilebilir bir kimliği olmalı.
+    #[test]
+    fn every_item_has_a_unique_valid_identifier() {
+        let mut seen = std::collections::HashSet::new();
+        let mut count = 0;
+        for id in 0..=MEAT {
+            let Some(def) = item_def(id) else {
+                assert!(item_identifier(id).is_none(), "tanımsız eşya {id} için kimlik var");
+                continue;
+            };
+            let name = item_identifier(id).unwrap_or_else(|| panic!("{} için kimlik yok", def.name));
+            assert!(crate::protocol::Identifier::parse(name).is_ok(), "geçersiz kimlik: {name}");
+            assert!(seen.insert(name), "yinelenen kimlik: {name}");
+            assert_eq!(item_from_identifier(name), Some(id));
+            count += 1;
+        }
+        assert_eq!(count, 23);
+        assert_eq!(item_from_identifier("minecraft:diamond"), None);
     }
 
     #[test]

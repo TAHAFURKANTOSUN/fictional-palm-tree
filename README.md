@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-181%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-197%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -71,7 +71,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **181 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **197 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -188,7 +188,7 @@ Motor bilerek iki katmana ayrıldı:
 
 | Katman | Modüller | Özellik |
 |---|---|---|
-| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
+| **Saf çekirdek** | `noise`, `world`, `blocks`, `mesh`, `atlas`, `raycast`, `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `protocol`, `pacing`, `sky`, `mat4` | Hiçbir tarayıcı API'si kullanmaz → `cargo test` ile doğrulanabilir |
 | **Tarayıcı katmanı** | `app`, `gl`, `hud` | Yalnızca `wasm32` hedefinde derlenir (`#[cfg(target_arch = "wasm32")]`) |
 
 Bu ayrım sayesinde oyunun **tüm kuralları** (arazi sürekliliği, mesh üretimi,
@@ -260,6 +260,30 @@ flowchart LR
   altında kalırsa 3B tuvalin çözünürlüğü kademeli düşürülür (%85 → %70 → %55);
   düşürme FPS'i artırmıyorsa geri alınır, yük kalkınca tam çözünürlüğe dönülür.
 
+### 🌐 Ağ protokolü temeli
+
+Oyun tek oyunculudur; `protocol` modülü çok oyunculu için hazırlanmış,
+**soket açmayan** bir kodlama katmanıdır. Tasarım Minecraft: Java Edition
+[protokol dokümantasyonunu](https://minecraft.wiki/w/Minecraft_Wiki:Protocol_documentation)
+izler:
+
+| Dokümantasyondaki kavram | Buradaki karşılığı |
+|---|---|
+| `VarInt` / `VarLong` | `Writer::var_int`, `Reader::var_int` (dokümandaki örnek tabloyla testli) |
+| `Position` (x 26, z 26, y 12 bit) | `Position::pack` / `unpack` |
+| `String`, `Identifier` | uzunluk önekli UTF-8; `ad_alanı:yol` kuralları |
+| Paket çerçeveleme | `frame`, akıştan paket ayıran `Decoder` |
+| Bağlantı durumları | `State` + `Connection`: Handshaking → Status / Login → Configuration → Play |
+| Aynı kimlik, farklı paket | `Packet::decode(durum, yön, kimlik, …)` |
+
+Her blok ve eşyanın kalıcı bir adı vardır (`blocks::item_identifier`):
+`minecraft:stone`, `minecraft:oak_log`, `voxelcraft:car`…
+
+Kapsam dışı: şifreleme, zlib sıkıştırması (sıkıştırılmış paket açıkça hata
+verir), NBT ve Minecraft'ın Play paketleri. Tarayıcı ham TCP açamadığı için
+gerçek Minecraft sunucularına bağlanmak mümkün değildir; bu katman kendi
+sunucumuzla WebSocket üzerinden konuşmak içindir.
+
 ### 📁 Proje yapısı
 
 ```text
@@ -283,6 +307,7 @@ voxelcraft-rs/
 │   ├── survival.rs       # can, açlık, nefes, hasar, oyun modu
 │   ├── effects.rs        # kazma ilerlemesi + kırılma parçacıkları
 │   ├── fishing.rs        # olta: şamandıra, bekleme, balığın vurması
+│   ├── protocol.rs       # ağ protokolü temeli: VarInt, Position, çerçeveleme, durumlar
 │   ├── mobs.rs           # hayvanlar ve zombi: gezinme, kaçma, kovalama
 │   ├── weapons.rs        # silahlar: atış aralığı, geri tepme, dürbün
 │   ├── vehicle.rs        # araba fiziği (gaz, direksiyon, basamak çıkma)
@@ -303,7 +328,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 181 test
+cargo test --lib          # 197 test
 ```
 
 <details>

@@ -5,7 +5,7 @@
 //! Motor bilerek ikiye ayrılmıştır:
 //!
 //! * **Saf çekirdek** (`blocks`, `world`, `noise`, `mesh`, `atlas`, `raycast`,
-//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
+//!   `player`, `inventory`, `crafting`, `survival`, `effects`, `fishing`, `vehicle`, `weapons`, `mobs`, `protocol`, `pacing`, `sky`, `mat4`) — hiçbir tarayıcı
 //!   API'si kullanmaz. `cargo test` ile tarayıcı olmadan doğrulanabilir.
 //! * **Tarayıcı katmanı** (`app`, `gl`, `hud`) — yalnızca `wasm32` hedefinde
 //!   derlenir; WebGL2 çizimi ve canvas arayüzünü yapar.
@@ -22,6 +22,7 @@ pub mod mobs;
 pub mod noise;
 pub mod pacing;
 pub mod player;
+pub mod protocol;
 pub mod raycast;
 pub mod sky;
 pub mod vehicle;
