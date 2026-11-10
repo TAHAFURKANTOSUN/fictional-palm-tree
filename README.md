@@ -9,7 +9,7 @@ Sıfırdan Rust ile yazıldı · WebAssembly'ye derlenir · WebGL2 ile çizilir.
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-wasm32-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![WebGL2](https://img.shields.io/badge/WebGL-2.0-990000?logo=webgl&logoColor=white)](https://www.khronos.org/webgl/)
 [![wasm-bindgen](https://img.shields.io/badge/wasm--bindgen-0.2.129-blue)](https://github.com/rustwasm/wasm-bindgen)
-[![Tests](https://img.shields.io/badge/testler-174%20ge%C3%A7ti-brightgreen)](#-doğrulama)
+[![Tests](https://img.shields.io/badge/testler-181%20ge%C3%A7ti-brightgreen)](#-doğrulama)
 [![License: MIT](https://img.shields.io/badge/lisans-MIT-yellow.svg)](#-lisans)
 
 [Özellikler](#-özellikler) •
@@ -59,7 +59,9 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   Tekerlekler döner, öndekiler direksiyonla kırılır; egzoz dumanı ve toz çıkar.
 - 🐑 **Hayvanlar ve yaratıklar** — koyun, domuz, tavuk çimenlerde gezinir
   (durur, yürür); vurulunca koşarak kaçar ve et bırakır. Gece çıkan zombi
-  oyuncuyu görünce koşarak kovalar; gündüz yanar.
+  oyuncuyu görünce koşarak kovalar. Mantar Kafa mesafesini korur ve zehir
+  tükürür. Canlılar ürer (yavrular büyür) ve ses çıkarır; gece yaratıkları
+  gündüz yanar.
 - 🔫 **Silahlar** — dürbünsüz tabanca ve sağ tıkla yakınlaştıran dürbünlü
   tüfek; namlu alevi, geri tepme, mermi izi ve isabet kırıntıları. Cam, yaprak
   ve meşaleyi parçalar.
@@ -69,7 +71,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **174 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **181 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -301,7 +303,7 @@ voxelcraft-rs/
 ### Birim testleri
 
 ```bash
-cargo test --lib          # 174 test
+cargo test --lib          # 181 test
 ```
 
 <details>

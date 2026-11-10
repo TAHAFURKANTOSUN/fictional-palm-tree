@@ -155,11 +155,19 @@ pub fn debug_add_item(id: u16, n: u32) {
     app::debug_add_item(id, n)
 }
 
-/// Oyuncunun 4 blok önüne bir canlı koyar: 0 koyun, 1 domuz, 2 tavuk, 3 zombi.
+/// Oyuncunun 4 blok önüne bir canlı koyar: 0 koyun, 1 domuz, 2 tavuk, 3 zombi,
+/// 4 mantar kafa.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn debug_spawn_mob(kind: u8) {
     app::debug_spawn_mob(kind)
+}
+
+/// Tüm canlıları ve uçan tükürükleri kaldırır.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn debug_clear_mobs() {
+    app::debug_clear_mobs()
 }
 
 /// Dürbünlü tüfekte nişan almayı (sağ tık basılı) açar / kapatır.

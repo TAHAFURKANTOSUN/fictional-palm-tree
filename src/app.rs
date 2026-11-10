@@ -23,7 +23,7 @@ use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
 use crate::mesh::{self, MeshBuffers};
-use crate::mobs::{Kind, MobEvent, Mobs, State};
+use crate::mobs::{Kind, MobEvent, Mobs, Sound, State, POISON_TIME};
 use crate::pacing::QualityGovernor;
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
@@ -480,6 +480,16 @@ impl Game {
         }
     }
 
+    /// Sesi, kaynağın oyuncuya uzaklığına göre kısılmış düzeyde çalar.
+    fn play_at(&self, name: &str, pos: [f64; 3]) {
+        let p = self.player.pos;
+        let d = ((pos[0] - p[0]).powi(2) + (pos[1] - p[1]).powi(2) + (pos[2] - p[2]).powi(2)).sqrt();
+        let volume = 1.0 - d / 30.0;
+        if volume > 0.0 {
+            sfx(name, volume * volume);
+        }
+    }
+
     /// Canlıları ilerletir ve olanları (saldırı, ölüm) oyuna uygular.
     fn update_mobs(&mut self, dt: f64) {
         let night = sky_state(self.day_time).light < 0.5;
@@ -489,6 +499,33 @@ impl Game {
         for ev in events.iter() {
             match *ev {
                 MobEvent::Attack(damage) => self.survival.damage(damage, "zombi"),
+                MobEvent::Sound(kind, sound, pos) => {
+                    let what = match sound {
+                        Sound::Idle => "idle",
+                        Sound::Hurt => "hurt",
+                        Sound::Alert => "alert",
+                        Sound::Spit => "spit",
+                    };
+                    self.play_at(&format!("{}_{}", kind.key(), what), pos);
+                }
+                MobEvent::Born(_, pos) => {
+                    self.play_at("born", pos);
+                    for _ in 0..10 {
+                        self.particles.puff([pos[0], pos[1] + 0.6, pos[2]], [0.0, 1.2, 0.0], 1.6, [255, 120, 160], 0.9, 0.07, -0.03);
+                    }
+                }
+                MobEvent::SpitHit(pos) => {
+                    for _ in 0..12 {
+                        self.particles.puff(pos, [0.0, 0.6, 0.0], 2.4, [120, 210, 70], 0.7, 0.08, -0.01);
+                    }
+                }
+                MobEvent::Poison => {
+                    if !self.survival.is_creative() {
+                        self.survival.poison_for(POISON_TIME);
+                        self.hud.toast("Zehirlendin!");
+                        sfx("poison", 1.0);
+                    }
+                }
                 MobEvent::Died(kind, pos) => {
                     let stats = kind.stats();
                     let color = if kind == Kind::Zombie { [70, 120, 70] } else { [230, 225, 215] };
@@ -502,6 +539,14 @@ impl Game {
             }
         }
         self.mob_events = events;
+
+        // Uçan tükürüklerin arkasında zehir izi.
+        for i in 0..self.mobs.spits.len() {
+            let pos = self.mobs.spits[i].pos;
+            if self.particles.chance(40.0, dt) {
+                self.particles.puff(pos, [0.0; 3], 0.5, [130, 220, 80], 0.3, 0.05, 0.1);
+            }
+        }
     }
 
     /// Ateş: mermi anında gider (ışın). İsabet ettiği bloktan kırıntı saçar,
@@ -511,6 +556,7 @@ impl Game {
             return;
         }
         self.shots_fired += 1;
+        sfx("shot", 1.0);
         let (eye, d) = (self.player.eye(), self.player.look_dir());
         let from = if self.gun.scoped() { eye } else { self.muzzle(w) };
         let mut end = [eye[0] + d[0] * w.range, eye[1] + d[1] * w.range, eye[2] + d[2] * w.range];
@@ -968,9 +1014,15 @@ impl Game {
             let bob = if idle { (m.idle_time * 2.2).sin() * 0.012 } else { (m.anim * 8.0).sin().abs() * 0.03 };
             let look = if idle { ((m.idle_time * 0.8).sin() * 0.6) as f32 } else { 0.0 };
             let lean = if running { -0.14 } else { 0.0 };
-            let at = |r: f64, u: f64, fw: f64| [p[0] + right[0] * r + f[0] * fw, p[1] + u + bob, p[2] + right[1] * r + f[1] * fw];
+            // Yavrular aynı modelin küçültülmüş hâlidir.
+            let sc = m.scale();
+            let at = |r: f64, u: f64, fw: f64| {
+                let (r, u, fw) = (r * sc, u * sc, fw * sc);
+                [p[0] + right[0] * r + f[0] * fw, p[1] + u + bob, p[2] + right[1] * r + f[1] * fw]
+            };
             let mut add = |center: [f64; 3], half: [f32; 3], yaw: f32, pitch: f32, color: [u8; 3]| {
-                boxes.push(BoxInst { center, half, yaw, pitch, color: tint(color), glow: false });
+                let k = sc as f32;
+                boxes.push(BoxInst { center, half: [half[0] * k, half[1] * k, half[2] * k], yaw, pitch, color: tint(color), glow: false });
             };
             // Kalçadan (ya da omuzdan) sarkan uzuv: `angle` kadar öne/arkaya savrulur.
             let limb = |r: f64, hip: f64, fw: f64, len: f64, w: f32, angle: f32| {
@@ -1004,6 +1056,25 @@ impl Game {
                         add(c, h, yaw, a, [240, 190, 60]);
                     }
                 }
+                Kind::Shroom => {
+                    // Sap gövde, kısa bacaklar ve beyaz benekli kırmızı şapka.
+                    let (stalk, cap, dot) = ([226, 214, 186], [200, 44, 40], [246, 246, 240]);
+                    // Şapka boştayken hafifçe sallanır, tükürmeden hemen önce geriye yatar.
+                    let wobble = if idle { ((m.idle_time * 1.7).sin() * 0.07) as f32 } else { 0.0 };
+                    for (r, sign) in [(-0.12, 1.0), (0.12, -1.0)] {
+                        let (c, h, a) = limb(r, 0.3, 0.0, 0.3, 0.08, swing * sign);
+                        add(c, h, yaw, a, [190, 176, 150]);
+                    }
+                    add(at(0.0, 0.66, 0.0), [0.2, 0.36, 0.18], yaw, lean, stalk);
+                    for r in [-0.09, 0.09] {
+                        add(at(r, 0.8, 0.185), [0.035, 0.05, 0.01], yaw, 0.0, [30, 30, 34]);
+                    }
+                    add(at(0.0, 1.1, 0.0), [0.44, 0.1, 0.44], yaw + look, wobble, cap);
+                    add(at(0.0, 1.24, 0.0), [0.3, 0.08, 0.3], yaw + look, wobble, cap);
+                    for (r, fw, u) in [(-0.24, 0.18, 1.21), (0.2, -0.22, 1.21), (0.26, 0.24, 1.21), (-0.08, -0.06, 1.33), (0.1, 0.12, 1.33)] {
+                        add(at(r, u, fw), [0.06, 0.012, 0.06], yaw + look, wobble, dot);
+                    }
+                }
                 Kind::Zombie => {
                     let (skin, shirt, pants) = ([86, 150, 86], [50, 122, 142], [58, 60, 120]);
                     add(at(0.0, 1.12, 0.0), [0.25, 0.37, 0.13], yaw, lean, shirt);
@@ -1020,6 +1091,11 @@ impl Game {
                     }
                 }
             }
+        }
+
+        // Zehir tükürükleri: parlayan yeşil damla.
+        for s in self.mobs.spits.iter() {
+            boxes.push(BoxInst { center: s.pos, half: [0.09, 0.09, 0.09], yaw: self.time * 6.0, pitch: self.time * 4.0, color: [130, 225, 70], glow: true });
         }
 
         // Elde silah: geri tepmeyle geri kayıp namlusu kalkar. Dürbünden
@@ -1831,6 +1907,10 @@ fn js_random() -> f64 {
 
 #[wasm_bindgen]
 extern "C" {
+    /// `index.html` içinde tanımlı: adı verilen ses efektini sentezleyip çalar.
+    #[wasm_bindgen(js_name = __sfx)]
+    fn sfx(name: &str, volume: f64);
+
     /// `index.html` içinde tanımlı: fare kilidi isteğini dener, reddi yutar.
     #[wasm_bindgen(js_name = __requestLock)]
     fn request_lock(el: &web_sys::Element);
@@ -1885,7 +1965,7 @@ pub fn debug_state_json() -> String {
                 "\"flying\":{},\"onGround\":{},\"renderDist\":{},",
                 "\"hudW\":{},\"hudH\":{},\"feetInWater\":{},",
                 "\"mining\":{:.2},\"particles\":{},\"renderScale\":{:.2},",
-                "\"zoom\":{:.2},\"shots\":{},\"tracers\":{},\"mobs\":[{}],",
+                "\"poison\":{:.1},\"spits\":{},\"zoom\":{:.2},\"shots\":{},\"tracers\":{},\"mobs\":[{}],",
                 "\"torches\":{},\"lights\":{},\"cars\":{},\"driving\":{},\"fishing\":\"{}\",",
                 "\"slots\":[{}]",
                 "}}"
@@ -1928,6 +2008,8 @@ pub fn debug_state_json() -> String {
             g.mining.progress,
             g.particles.list.len(),
             g.render_scale,
+            g.survival.poison,
+            g.mobs.spits.len(),
             g.gun.zoom,
             g.shots_fired,
             g.tracers.len(),
@@ -2026,10 +2108,17 @@ pub fn debug_set_time(t: f64) {
 
 pub fn debug_spawn_mob(kind: u8) {
     with_game(|g| {
-        let kind = [Kind::Sheep, Kind::Pig, Kind::Chicken, Kind::Zombie][kind as usize % 4];
+        let kind = [Kind::Sheep, Kind::Pig, Kind::Chicken, Kind::Zombie, Kind::Shroom][kind as usize % 5];
         let (f, _) = g.player.basis();
         let p = g.player.pos;
         g.mobs.spawn(kind, [p[0] + f[0] * 4.0, p[1] + 1.2, p[2] + f[1] * 4.0]);
+    });
+}
+
+pub fn debug_clear_mobs() {
+    with_game(|g| {
+        g.mobs.list.clear();
+        g.mobs.spits.clear();
     });
 }
 

@@ -104,6 +104,7 @@ struct HudKey {
     creative: bool,
     flying: bool,
     scoped: bool,
+    poisoned: bool,
     dead: bool,
     health: i32,
     hunger: i32,
@@ -228,6 +229,7 @@ impl Hud {
             creative: s.is_creative(),
             flying: f.flying,
             scoped: f.scoped,
+            poisoned: s.poison > 0.0,
             dead: s.dead,
             health: s.health,
             hunger: s.hunger,
@@ -298,7 +300,7 @@ impl Hud {
             let craft_h = 3.0 * sc + 2.0 * gc;
             let fixed = fixed_no_craft + 4.0 * (sc + gc);
             let avail = (h - 20.0) - fixed - craft_h;
-            let rh = (((avail - label_row) / rows) - row_gap).clamp(20.0, 34.0);
+            let rh = (((avail - label_row) / rows) - row_gap).clamp(16.0, 34.0);
             let list_h = label_row + rows * (rh + row_gap);
             if fixed + craft_h.max(list_h) <= h - 20.0 {
                 s = sc;
@@ -310,7 +312,7 @@ impl Hud {
         let craft_h = 3.0 * s + 2.0 * g;
         let fixed = fixed_no_craft + 4.0 * (s + g);
         let avail = (h - 20.0) - fixed - craft_h;
-        let row_h = (((avail - label_row) / rows) - row_gap).clamp(20.0, 34.0);
+        let row_h = (((avail - label_row) / rows) - row_gap).clamp(16.0, 34.0);
         let list_h = label_row + rows * (row_h + row_gap);
         let craft_area_h = craft_h.max(list_h);
 
@@ -624,8 +626,9 @@ impl Hud {
                 l.vitals_hearts.x + i as f64 * per,
                 l.vitals_hearts.y,
                 icon,
-                "#e2453e",
-                "#5d1714",
+                // Zehirliyken kalpler yeşile döner.
+                if s.poison > 0.0 { "#7fbf3f" } else { "#e2453e" },
+                if s.poison > 0.0 { "#2f4f17" } else { "#5d1714" },
                 "#3c3c3c",
                 "#232323",
                 v,

@@ -81,6 +81,9 @@ pub struct Survival {
     /// Ekran kırmızı vinyetinin opaklığı (1 → 0 sönümlenir).
     pub hurt_flash: f64,
     pub eat_cooldown: f64,
+    /// Zehirlenmenin kalan süresi (saniye); sürerken saniyede 1 can götürür.
+    pub poison: f64,
+    poison_tick: f64,
     pub fall_peak: Option<f64>,
     saved_inventory: Option<Slots>,
     regen_timer: f64,
@@ -108,6 +111,8 @@ impl Survival {
             dead: false,
             hurt_flash: 0.0,
             eat_cooldown: 0.0,
+            poison: 0.0,
+            poison_tick: 0.0,
             fall_peak: None,
             saved_inventory: None,
             regen_timer: REGEN_INTERVAL,
@@ -139,6 +144,18 @@ impl Survival {
         self.regen_timer = REGEN_INTERVAL;
         self.starve_timer = STARVE_INTERVAL;
         self.drown_timer = 0.0;
+        self.poison = 0.0;
+    }
+
+    /// Zehirler (yaratıcıda ve ölüyken etkisiz). Süre birikmez, yenilenir.
+    pub fn poison_for(&mut self, seconds: f64) {
+        if self.is_creative() || self.dead {
+            return;
+        }
+        if self.poison <= 0.0 {
+            self.poison_tick = 1.0;
+        }
+        self.poison = self.poison.max(seconds);
     }
 
     /// Hasar verir. Yaratıcıda, ölüyken ve dokunulmazlık sırasında yok sayılır.
@@ -255,6 +272,20 @@ impl Survival {
                 self.air = MAX_AIR;
             }
             return;
+        }
+
+        // --- zehir: saniyede 1 can; tek başına öldürmez ---
+        if self.poison > 0.0 {
+            self.poison -= dt;
+            self.poison_tick -= dt;
+            // Küçük pay: kayan nokta birikimi son vuruşu kaçırmasın.
+            if self.poison_tick <= 1e-9 {
+                self.poison_tick = 1.0;
+                if self.health > 1 {
+                    self.invuln = 0.0;
+                    self.damage(1, "zehir");
+                }
+            }
         }
 
         // --- nefes / boğulma ---
@@ -628,6 +659,30 @@ mod tests {
         assert!(s.try_eat(&mut inv));
         assert_eq!(s.hunger, 15);
         assert_eq!(inv.count(crate::blocks::FISH), 1);
+    }
+
+    #[test]
+    fn poison_hurts_once_a_second_but_never_kills() {
+        let mut s = Survival::new();
+        s.hunger = 10; // iyileşme karışmasın
+        s.poison_for(5.0);
+        tick_for(&mut s, 5.5, grounded());
+        assert_eq!(s.health, MAX_HEALTH - 5, "5 saniyede 5 can");
+        assert!(s.poison <= 0.0);
+        tick_for(&mut s, 3.0, grounded());
+        assert_eq!(s.health, MAX_HEALTH - 5, "zehir bitince hasar durmalı");
+
+        s.health = 2;
+        s.poison_for(5.0);
+        tick_for(&mut s, 6.0, grounded());
+        assert_eq!(s.health, 1, "zehir son canı almaz");
+        assert!(!s.dead);
+
+        let mut c = Survival::new();
+        let mut inv = Inventory::new();
+        c.set_mode(GameMode::Creative, &mut inv);
+        c.poison_for(5.0);
+        assert_eq!(c.poison, 0.0, "yaratıcıda zehir işlemez");
     }
 
     #[test]

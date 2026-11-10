@@ -336,14 +336,23 @@ async function main() {
         await sleep(100);
         chasing = (await state()).mobs.find(m => m[0] === 'Zombi' && m[1] === 'Run') || null;
       }
+      // Mantar Kafa zehir tükürür (yaratıcıda oyuncu zehirlenmez).
+      await evalJs(`${v}.debug_spawn_mob(4); 1`);
+      let spat = false;
+      for (let i = 0; i < 150 && !spat; i++) { await sleep(100); spat = (await evalJs(`window.__sfxLog.includes('shroom_spit')`)) === true; }
+      const sounds = await evalJs(`[...new Set(window.__sfxLog)]`);
       const wandering = (await state()).mobs.filter(m => m[1] === 'Idle' || m[1] === 'Walk').length;
       await evalJs(`${v}.debug_set_time(0.3); 1`);
       let burned = false;
       // Yanma oyun zamanıyla ilerler; yavaş makinede uzun sürebilir.
       for (let i = 0; i < 600 && !burned; i++) { await sleep(100); burned = !(await state()).mobs.some(m => m[0] === 'Zombi'); }
-      await evalJs(`${v}.debug_set_mode(false); 1`);
+      // Sonraki adımları canlılar etkilemesin.
+      await evalJs(`${v}.debug_clear_mobs(); ${v}.debug_set_mode(false); 1`);
       await sleep(300);
-      out.mobs = { fled, chasing, wandering, burned };
+      out.mobs = { fled, chasing, wandering, burned, spat, sounds };
+      expect('mantar kafa zehir tükürür', spat, out.mobs);
+      expect('sesler çalınır: atış, koyunun canı yanması, zombinin fark etmesi',
+        ['shot', 'sheep_hurt', 'zombie_alert'].every(n => sounds.includes(n)), sounds);
       expect('vurulan koyun hasar alır ve koşarak kaçar', fled && fled[1] === 'Run' && fled[2] === 3, out.mobs);
       expect('zombi oyuncuyu koşarak kovalar', !!chasing, out.mobs);
       expect('zombi gündüz yanar', burned, out.mobs);

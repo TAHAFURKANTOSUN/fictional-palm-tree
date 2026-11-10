@@ -7,6 +7,12 @@
 //!   saldırgandan **koşarak kaçar**.
 //! * **Zombi** — gece ortaya çıkar, gezinir; oyuncuyu fark edince **koşarak
 //!   kovalar** ve yakındaysa vurur. Gündüz yanar.
+//! * **Mantar Kafa** — gece ortaya çıkar; oyuncuyla arasında mesafe tutar
+//!   (uzaksa yaklaşır, yakınsa koşarak uzaklaşır) ve **zehir tükürür**.
+//!   O da gündüz yanar.
+//!
+//! Aynı türden iki yetişkin yan yana gelince **yavrular**; yavru zamanla
+//! büyür. Her canlı ara sıra ses çıkarır (olay olarak bildirilir).
 
 use crate::blocks::{is_liquid, is_solid, AIR, GRASS, LEAVES, TORCH, WATER};
 use crate::player::{Player, GRAVITY};
@@ -18,6 +24,19 @@ pub enum Kind {
     Pig,
     Chicken,
     Zombie,
+    Shroom,
+}
+
+/// Canlının çıkardığı ses türü.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sound {
+    /// Ara sıra kendi kendine.
+    Idle,
+    Hurt,
+    /// Zombi oyuncuyu fark etti.
+    Alert,
+    /// Mantar Kafa zehir tükürdü.
+    Spit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -45,11 +64,23 @@ impl Kind {
             Kind::Pig => Stats { name: "Domuz", radius: 0.42, height: 0.9, health: 10, walk: 1.4, run: 4.9, meat: 2 },
             Kind::Chicken => Stats { name: "Tavuk", radius: 0.24, height: 0.6, health: 4, walk: 1.1, run: 3.9, meat: 1 },
             Kind::Zombie => Stats { name: "Zombi", radius: 0.3, height: 1.8, health: 20, walk: 1.0, run: 3.6, meat: 0 },
+            Kind::Shroom => Stats { name: "Mantar Kafa", radius: 0.32, height: 1.3, health: 14, walk: 1.2, run: 3.2, meat: 0 },
         }
     }
 
     pub fn hostile(self) -> bool {
-        self == Kind::Zombie
+        matches!(self, Kind::Zombie | Kind::Shroom)
+    }
+
+    /// Ses dosyası adlarında kullanılan kısa anahtar.
+    pub fn key(self) -> &'static str {
+        match self {
+            Kind::Sheep => "sheep",
+            Kind::Pig => "pig",
+            Kind::Chicken => "chicken",
+            Kind::Zombie => "zombie",
+            Kind::Shroom => "shroom",
+        }
     }
 }
 
@@ -60,8 +91,26 @@ pub const ZOMBIE_DAMAGE: i32 = 3;
 const ATTACK_INTERVAL: f64 = 1.2;
 const FLEE_TIME: f64 = 5.0;
 const JUMP_SPEED: f64 = 8.6;
+/// Kendiliğinden doğma sınırları; üremeyle `BREED_*` sınırına kadar çıkılır.
 const MAX_ANIMALS: usize = 8;
 const MAX_ZOMBIES: usize = 4;
+const BREED_MAX_ANIMALS: usize = 14;
+const BREED_MAX_HOSTILE: usize = 6;
+/// Eş arama ve çiftleşme mesafeleri.
+const LURE_RANGE: f64 = 16.0;
+const BREED_RANGE: f64 = 2.6;
+const BREED_COOLDOWN: f64 = 60.0;
+/// Yavrunun yetişkin olma süresi (saniye).
+const GROW_TIME: f64 = 45.0;
+/// Mantar Kafa'nın tükürme menzili, aralığı ve tutmak istediği mesafe.
+const SPIT_RANGE: f64 = 12.0;
+const SPIT_INTERVAL: f64 = 2.4;
+const SPIT_SPEED: f64 = 11.0;
+const SPIT_GRAVITY: f64 = 9.0;
+const KEEP_FAR: f64 = 7.0;
+const KEEP_NEAR: f64 = 3.5;
+/// Zehirlenmenin süresi (saniye).
+pub const POISON_TIME: f64 = 5.0;
 const DESPAWN_DIST: f64 = 90.0;
 
 pub struct Mob {
@@ -85,6 +134,16 @@ pub struct Mob {
     flee: f64,
     flee_from: [f64; 2],
     attack_cd: f64,
+    /// Büyüme: 0 yeni doğmuş yavru, 1 yetişkin.
+    pub age: f64,
+    breed_cd: f64,
+    /// Yakındaki uygun eşin yönü (varsa gezinirken ona doğru yürür).
+    lure: Option<f64>,
+    voice: f64,
+    spit_cd: f64,
+    /// Bu adımda çıkarılan ses / atılan tükürük; `Mobs::tick` toplar.
+    pending_sound: Option<Sound>,
+    pending_spit: bool,
 }
 
 impl Mob {
@@ -105,7 +164,23 @@ impl Mob {
             flee: 0.0,
             flee_from: [pos[0], pos[2]],
             attack_cd: 0.0,
+            age: 1.0,
+            breed_cd: 20.0,
+            lure: None,
+            voice: 4.0,
+            spit_cd: 1.0,
+            pending_sound: None,
+            pending_spit: false,
         }
+    }
+
+    /// Boyut çarpanı: yavrular yarı boydadır.
+    pub fn scale(&self) -> f64 {
+        0.5 + 0.5 * self.age.min(1.0)
+    }
+
+    pub fn adult(&self) -> bool {
+        self.age >= 1.0
     }
 
     pub fn forward(&self) -> [f64; 2] {
@@ -117,6 +192,7 @@ impl Mob {
     pub fn damage(&mut self, amount: i32, from: [f64; 3]) -> bool {
         self.health -= amount;
         self.hurt = 1.0;
+        self.pending_sound = Some(Sound::Hurt);
         // Geri savrulma.
         let (dx, dz) = (self.body.pos[0] - from[0], self.body.pos[2] - from[2]);
         let d = dx.hypot(dz).max(1e-6);
@@ -136,15 +212,57 @@ impl Mob {
         self.attack_cd = (self.attack_cd - dt).max(0.0);
         self.timer -= dt;
         self.idle_time += dt;
+        self.breed_cd = (self.breed_cd - dt).max(0.0);
+        self.spit_cd = (self.spit_cd - dt).max(0.0);
+        // Büyüme: gövde de boyla birlikte büyür.
+        if self.age < 1.0 {
+            self.age = (self.age + dt / GROW_TIME).min(1.0);
+        }
+        self.body.radius = s.radius * self.scale();
+        self.body.height = s.height * self.scale();
+        // Ara sıra kendi kendine ses çıkarır.
+        self.voice -= dt;
+        if self.voice <= 0.0 {
+            self.voice = 6.0 + rand() * 9.0;
+            self.pending_sound.get_or_insert(Sound::Idle);
+        }
         let pos = self.body.pos;
         let (px, pz) = (player[0] - pos[0], player[2] - pos[2]);
         let dist = px.hypot(pz);
         let mut attacked = false;
         let mut hold = false;
 
-        if self.kind.hostile() {
+        if self.kind == Kind::Shroom {
+            if dist < CHASE_RANGE && (player[1] - pos[1]).abs() < 8.0 {
+                // Mesafeyi korur: uzaksa yaklaşır, fazla yakınsa koşarak uzaklaşır.
+                let toward = (-px).atan2(-pz);
+                if dist < KEEP_NEAR {
+                    self.state = State::Run;
+                    self.heading = toward + std::f64::consts::PI;
+                } else {
+                    self.heading = toward;
+                    if dist > KEEP_FAR {
+                        self.state = State::Walk;
+                    } else {
+                        self.state = State::Idle;
+                    }
+                    self.timer = 1.0;
+                    if dist < SPIT_RANGE && self.spit_cd == 0.0 {
+                        self.spit_cd = SPIT_INTERVAL;
+                        self.pending_spit = true;
+                        self.pending_sound = Some(Sound::Spit);
+                    }
+                }
+            } else if self.state == State::Run {
+                self.state = State::Idle;
+                self.timer = 1.0;
+            }
+        } else if self.kind.hostile() {
             if dist < CHASE_RANGE && (player[1] - pos[1]).abs() < 8.0 {
                 // Oyuncuyu gördü: koşarak kovala.
+                if self.state != State::Run {
+                    self.pending_sound = Some(Sound::Alert);
+                }
                 self.state = State::Run;
                 self.heading = (-px).atan2(-pz);
                 if dist < ATTACK_RANGE {
@@ -175,7 +293,9 @@ impl Mob {
         if self.state != State::Run && self.timer <= 0.0 {
             if self.state == State::Idle {
                 self.state = State::Walk;
-                self.heading = rand() * std::f64::consts::TAU;
+                // Üremeye hazırsa ve yakında eş varsa ona doğru yürür.
+                let random = rand() * std::f64::consts::TAU;
+                self.heading = self.lure.unwrap_or(random);
                 self.timer = 2.0 + rand() * 3.5;
             } else {
                 self.state = State::Idle;
@@ -201,7 +321,8 @@ impl Mob {
         let f = self.forward();
 
         // Gezinirken suya ve uçuruma yürümez: önü uygun değilse yön değiştirir.
-        if self.state == State::Walk && speed > 0.0 {
+        // (Mantar Kafa oyuncuya yürürken yönünü kendi belirler.)
+        if self.state == State::Walk && speed > 0.0 && self.kind != Kind::Shroom {
             let (ax, az) = ((pos[0] + f[0] * 0.9).floor() as i32, (pos[2] + f[1] * 0.9).floor() as i32);
             let y = pos[1].floor() as i32;
             let water = world.get_block(ax, y, az) == WATER || world.get_block(ax, y - 1, az) == WATER;
@@ -256,17 +377,34 @@ pub enum MobEvent {
     Attack(i32),
     /// Bir canlı öldü (ganimet ve parçacıklar için).
     Died(Kind, [f64; 3]),
+    /// Bir canlı ses çıkardı.
+    Sound(Kind, Sound, [f64; 3]),
+    /// Bir yavru doğdu.
+    Born(Kind, [f64; 3]),
+    /// Zehir tükürüğü bir yere çarptı (bulut için).
+    SpitHit([f64; 3]),
+    /// Zehir tükürüğü oyuncuya isabet etti.
+    Poison,
+}
+
+/// Havada uçan zehir tükürüğü.
+pub struct Spit {
+    pub pos: [f64; 3],
+    pub vel: [f64; 3],
+    life: f64,
 }
 
 pub struct Mobs {
     pub list: Vec<Mob>,
+    pub spits: Vec<Spit>,
     rng: u32,
     spawn_timer: f64,
+    breed_timer: f64,
 }
 
 impl Default for Mobs {
     fn default() -> Self {
-        Self { list: Vec::new(), rng: 0x9e37_79b9, spawn_timer: 2.0 }
+        Self { list: Vec::new(), spits: Vec::new(), rng: 0x9e37_79b9, spawn_timer: 2.0, breed_timer: 1.0 }
     }
 }
 
@@ -315,7 +453,7 @@ impl Mobs {
             return;
         }
         let kind = if hostile {
-            Kind::Zombie
+            if self.rand() < 0.65 { Kind::Zombie } else { Kind::Shroom }
         } else {
             [Kind::Sheep, Kind::Pig, Kind::Chicken][(self.rand() * 3.0) as usize % 3]
         };
@@ -333,6 +471,13 @@ impl Mobs {
             self.try_spawn(world, player, night);
         }
 
+        self.breed_timer -= dt;
+        if self.breed_timer <= 0.0 {
+            self.breed_timer = 1.0;
+            self.breed(night, events);
+        }
+
+        let chest = [player[0], player[1] + 0.9, player[2]];
         let mut rng = self.rng;
         let mut rand = move || {
             rng ^= rng << 13;
@@ -344,7 +489,19 @@ impl Mobs {
             if m.update(world, dt, player, &mut rand) {
                 events.push(MobEvent::Attack(ZOMBIE_DAMAGE));
             }
-            // Zombiler gün ışığında yanar.
+            if let Some(sound) = m.pending_sound.take() {
+                events.push(MobEvent::Sound(m.kind, sound, m.body.pos));
+            }
+            if std::mem::take(&mut m.pending_spit) {
+                // Oyuncunun göğsüne nişan alır; düşüşü karşılayacak kadar yukarı atar.
+                let from = [m.body.pos[0], m.body.pos[1] + m.body.height * 0.85, m.body.pos[2]];
+                let d = [chest[0] - from[0], chest[1] - from[1], chest[2] - from[2]];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+                let t = len / SPIT_SPEED;
+                let vel = [d[0] / len * SPIT_SPEED, d[1] / len * SPIT_SPEED + 0.5 * SPIT_GRAVITY * t, d[2] / len * SPIT_SPEED];
+                self.spits.push(Spit { pos: from, vel, life: 3.0 });
+            }
+            // Gece yaratıkları gün ışığında yanar.
             if m.kind.hostile() && !night {
                 m.idle_time += dt;
                 if (m.idle_time * 2.0).fract() < dt * 2.0 {
@@ -355,6 +512,29 @@ impl Mobs {
         }
         self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) | 1;
 
+        // Tükürükler: küçük adımlarla uçar; bloğa ya da oyuncuya çarpınca biter.
+        self.spits.retain_mut(|s| {
+            s.life -= dt;
+            s.vel[1] -= SPIT_GRAVITY * dt;
+            let steps = 4;
+            for _ in 0..steps {
+                for a in 0..3 {
+                    s.pos[a] += s.vel[a] * dt / steps as f64;
+                }
+                let d2 = (0..3).map(|a| (s.pos[a] - chest[a]).powi(2)).sum::<f64>();
+                if d2 < 0.75 * 0.75 {
+                    events.push(MobEvent::Poison);
+                    events.push(MobEvent::SpitHit(s.pos));
+                    return false;
+                }
+                if is_solid(world.get_block(s.pos[0].floor() as i32, s.pos[1].floor() as i32, s.pos[2].floor() as i32)) {
+                    events.push(MobEvent::SpitHit(s.pos));
+                    return false;
+                }
+            }
+            s.life > 0.0
+        });
+
         self.list.retain(|m| {
             if m.health <= 0 {
                 events.push(MobEvent::Died(m.kind, m.body.pos));
@@ -363,6 +543,48 @@ impl Mobs {
             let p = m.body.pos;
             (p[0] - player[0]).hypot(p[2] - player[2]) < DESPAWN_DIST && p[1] > -10.0
         });
+    }
+
+    /// Üreme: üremeye hazır iki yetişkin yan yanaysa bir yavru doğar; uzaktaysa
+    /// birbirlerine doğru çekilirler. Yaratıklar yalnızca gece ürer.
+    fn breed(&mut self, night: bool, events: &mut Vec<MobEvent>) {
+        let ready = |m: &Mob| m.adult() && m.breed_cd == 0.0 && m.health > 0 && m.state != State::Run;
+        for m in self.list.iter_mut() {
+            m.lure = None;
+        }
+        for i in 0..self.list.len() {
+            if !ready(&self.list[i]) {
+                continue;
+            }
+            let kind = self.list[i].kind;
+            let hostile = kind.hostile();
+            let cap = if hostile { BREED_MAX_HOSTILE } else { BREED_MAX_ANIMALS };
+            if (hostile && !night) || self.count(hostile) >= cap {
+                continue;
+            }
+            let a = self.list[i].body.pos;
+            // En yakın uygun eş.
+            let mate = (0..self.list.len())
+                .filter(|&j| j != i && self.list[j].kind == kind && ready(&self.list[j]))
+                .map(|j| (j, (self.list[j].body.pos[0] - a[0]).hypot(self.list[j].body.pos[2] - a[2])))
+                .filter(|&(_, d)| d < LURE_RANGE)
+                .min_by(|x, y| x.1.total_cmp(&y.1));
+            let Some((j, dist)) = mate else { continue };
+            let b = self.list[j].body.pos;
+            if dist < BREED_RANGE {
+                let cd = BREED_COOLDOWN + self.rand() * 30.0;
+                self.list[i].breed_cd = cd;
+                self.list[j].breed_cd = cd;
+                let pos = [(a[0] + b[0]) * 0.5, a[1].max(b[1]) + 0.1, (a[2] + b[2]) * 0.5];
+                let mut baby = Mob::new(kind, pos, self.rand() * std::f64::consts::TAU);
+                baby.age = 0.0;
+                baby.breed_cd = BREED_COOLDOWN;
+                self.list.push(baby);
+                events.push(MobEvent::Born(kind, pos));
+            } else {
+                self.list[i].lure = Some((-(b[0] - a[0])).atan2(-(b[2] - a[2])));
+            }
+        }
     }
 
     /// Işının çarptığı en yakın canlı: `(sıra, uzaklık)`.
@@ -429,6 +651,8 @@ mod tests {
     }
 
     const FAR: [f64; 3] = [500.0, 21.0, 500.0];
+    /// Zombinin fark edemeyeceği kadar uzak ama canlıların silinmeyeceği kadar yakın.
+    const AWAY: [f64; 3] = [40.5, 21.0, 40.5];
 
     fn run(m: &mut Mob, w: &World, seconds: f64, player: [f64; 3]) -> u32 {
         let mut s = 12345u32;
@@ -522,7 +746,7 @@ mod tests {
         let mut ev = Vec::new();
         mobs.tick(&w, 0.02, FAR, false, &mut ev);
         assert!(mobs.list.is_empty());
-        assert!(matches!(ev[0], MobEvent::Died(Kind::Chicken, _)));
+        assert!(ev.iter().any(|e| matches!(e, MobEvent::Died(Kind::Chicken, _))));
         assert_eq!(Kind::Chicken.stats().meat, 1);
         assert_eq!(Kind::Zombie.stats().meat, 0);
     }
@@ -548,14 +772,154 @@ mod tests {
         for _ in 0..6000 {
             mobs.tick(&w, 0.05, player, true, &mut ev);
         }
-        assert!(mobs.count(false) > 0 && mobs.count(false) <= MAX_ANIMALS, "hayvan: {}", mobs.count(false));
-        assert!(mobs.count(true) > 0 && mobs.count(true) <= MAX_ZOMBIES, "zombi: {}", mobs.count(true));
+        assert!(mobs.count(false) > 0 && mobs.count(false) <= BREED_MAX_ANIMALS, "hayvan: {}", mobs.count(false));
+        assert!(mobs.count(true) > 0 && mobs.count(true) <= BREED_MAX_HOSTILE, "yaratık: {}", mobs.count(true));
         for m in &mobs.list {
             assert!(m.body.pos[1] > 20.5, "zeminin altında doğmuş: {:?}", m.body.pos);
         }
         for _ in 0..1200 {
             mobs.tick(&w, 0.05, FAR, false, &mut ev);
         }
-        assert_eq!(mobs.count(true), 0, "zombiler gündüz yanmalı");
+        assert_eq!(mobs.count(true), 0, "gece yaratıkları gündüz yanmalı");
+    }
+
+    #[test]
+    fn two_adults_breed_and_the_baby_grows_up() {
+        let w = flat();
+        let mut mobs = Mobs::default();
+        mobs.spawn(Kind::Sheep, [0.5, 21.0, 0.5]);
+        mobs.spawn(Kind::Sheep, [1.9, 21.0, 0.5]);
+        for m in mobs.list.iter_mut() {
+            m.breed_cd = 0.0;
+            m.state = State::Idle;
+            m.timer = 100.0; // yerlerinde dursunlar
+        }
+        let mut ev = Vec::new();
+        mobs.spawn_timer = 1e9;
+        for _ in 0..80 {
+            mobs.tick(&w, 0.05, AWAY, false, &mut ev);
+        }
+        assert_eq!(mobs.list.len(), 3, "bir yavru doğmalı (ve bekleme süresi ikincisini engellemeli)");
+        assert_eq!(ev.iter().filter(|e| matches!(e, MobEvent::Born(Kind::Sheep, _))).count(), 1);
+        let baby = &mobs.list[2];
+        assert!(!baby.adult() && baby.scale() < 0.6, "yavru küçük doğmalı");
+        assert!(baby.body.height < Kind::Sheep.stats().height * 0.6);
+        for _ in 0..(GROW_TIME / 0.05) as usize + 10 {
+            mobs.tick(&w, 0.05, AWAY, false, &mut ev);
+        }
+        assert!(mobs.list[2].adult() && mobs.list[2].scale() == 1.0, "yavru büyümeli");
+    }
+
+    #[test]
+    fn distant_mates_walk_towards_each_other() {
+        let w = flat();
+        let mut mobs = Mobs::default();
+        mobs.spawn(Kind::Pig, [-5.5, 21.0, 0.5]);
+        mobs.spawn(Kind::Pig, [5.5, 21.0, 0.5]);
+        for m in mobs.list.iter_mut() {
+            m.breed_cd = 0.0;
+        }
+        mobs.spawn_timer = 1e9;
+        let mut ev = Vec::new();
+        for _ in 0..1600 {
+            mobs.tick(&w, 0.05, AWAY, false, &mut ev);
+            if mobs.list.len() > 2 {
+                break;
+            }
+        }
+        assert!(mobs.list.len() > 2, "uzaktaki eşler buluşup yavrulamalı");
+    }
+
+    #[test]
+    fn creatures_only_breed_at_night() {
+        let w = flat();
+        let mut mobs = Mobs::default();
+        mobs.spawn(Kind::Shroom, [0.5, 21.0, 0.5]);
+        mobs.spawn(Kind::Shroom, [1.9, 21.0, 0.5]);
+        for m in mobs.list.iter_mut() {
+            m.breed_cd = 0.0;
+            m.timer = 100.0;
+        }
+        mobs.spawn_timer = 1e9;
+        let mut ev = Vec::new();
+        for _ in 0..60 {
+            mobs.tick(&w, 0.05, AWAY, false, &mut ev);
+        }
+        assert_eq!(mobs.list.len(), 2, "gündüz üremezler");
+        for _ in 0..60 {
+            mobs.tick(&w, 0.05, AWAY, true, &mut ev);
+        }
+        assert_eq!(mobs.list.len(), 3, "gece ürerler");
+    }
+
+    #[test]
+    fn mushroom_head_keeps_its_distance_and_spits_poison() {
+        let w = flat();
+        let mut mobs = Mobs::default();
+        mobs.spawn(Kind::Shroom, [0.5, 21.0, 0.5]);
+        mobs.spawn_timer = 1e9;
+        let player = [6.5, 21.0, 0.5];
+        let mut ev = Vec::new();
+        for _ in 0..200 {
+            mobs.tick(&w, 0.05, player, true, &mut ev);
+        }
+        let spat = ev.iter().filter(|e| matches!(e, MobEvent::Sound(Kind::Shroom, Sound::Spit, _))).count();
+        let poisoned = ev.iter().filter(|e| matches!(e, MobEvent::Poison)).count();
+        assert!((3..=5).contains(&spat), "10 saniyede aralıklı tükürmeli: {spat}");
+        assert!(poisoned >= 2, "duran oyuncuya isabet etmeli: {poisoned}");
+        assert!(mobs.spits.len() <= 1);
+
+        // Oyuncu dibine gelince koşarak uzaklaşır.
+        let m = &mobs.list[0];
+        let near = [m.body.pos[0] + 1.5, 21.0, m.body.pos[2]];
+        let x0 = m.body.pos[0];
+        for _ in 0..40 {
+            mobs.tick(&w, 0.05, near, true, &mut ev);
+        }
+        assert!(mobs.list[0].body.pos[0] < x0 - 1.5, "yakındaki oyuncudan uzaklaşmalı");
+    }
+
+    #[test]
+    fn spit_stops_at_walls() {
+        let mut w = flat();
+        for y in 21..26 {
+            for z in -3..4 {
+                w.set_block_raw(3, y, z, STONE);
+            }
+        }
+        let mut mobs = Mobs::default();
+        mobs.spawn(Kind::Shroom, [0.5, 21.0, 0.5]);
+        mobs.spawn_timer = 1e9;
+        let mut ev = Vec::new();
+        for _ in 0..200 {
+            mobs.tick(&w, 0.05, [6.5, 21.0, 0.5], true, &mut ev);
+        }
+        assert!(ev.iter().any(|e| matches!(e, MobEvent::SpitHit(_))), "tükürük duvara çarpmalı");
+        assert!(!ev.iter().any(|e| matches!(e, MobEvent::Poison)), "duvarın arkasındaki oyuncu zehirlenmemeli");
+    }
+
+    #[test]
+    fn mobs_make_idle_hurt_and_alert_sounds() {
+        let w = flat();
+        let mut mobs = Mobs::default();
+        mobs.spawn(Kind::Sheep, [0.5, 21.0, 0.5]);
+        mobs.spawn(Kind::Zombie, [20.5, 21.0, 20.5]);
+        mobs.spawn_timer = 1e9;
+        let mut ev = Vec::new();
+        for _ in 0..400 {
+            mobs.tick(&w, 0.05, AWAY, true, &mut ev);
+        }
+        let count = |ev: &Vec<MobEvent>, k: Kind, s: Sound| ev.iter().filter(|e| matches!(e, MobEvent::Sound(a, b, _) if *a == k && *b == s)).count();
+        assert!((1..=4).contains(&count(&ev, Kind::Sheep, Sound::Idle)), "20 saniyede ara sıra melemeli");
+        assert_eq!(count(&ev, Kind::Zombie, Sound::Alert), 0);
+
+        ev.clear();
+        mobs.list[0].damage(1, [3.0, 21.0, 0.5]);
+        let zp = mobs.list[1].body.pos;
+        mobs.tick(&w, 0.05, [zp[0] + 6.0, 21.0, zp[2]], true, &mut ev);
+        assert_eq!(count(&ev, Kind::Sheep, Sound::Hurt), 1);
+        assert_eq!(count(&ev, Kind::Zombie, Sound::Alert), 1, "oyuncuyu fark edince bir kez hırlamalı");
+        mobs.tick(&w, 0.05, [zp[0] + 6.0, 21.0, zp[2]], true, &mut ev);
+        assert_eq!(count(&ev, Kind::Zombie, Sound::Alert), 1, "kovalarken tekrar tekrar değil");
     }
 }
