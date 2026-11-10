@@ -176,6 +176,7 @@ impl World {
 
         // Ağaçlar 3 blok taşma payıyla taranır: chunk sınırına denk gelen bir
         // ağaç ikiye bölünse de her iki tarafta tutarlı çıkar.
+        let terrain_top = content_top;
         for z in -3..CHUNK_SIZE + 3 {
             for x in -3..CHUNK_SIZE + 3 {
                 let wx = x0 + x;
@@ -188,6 +189,25 @@ impl World {
                     continue;
                 }
                 content_top = content_top.max(place_tree(&mut data, x, h + 1, z, wx, wz));
+            }
+        }
+
+        // Yabani bitkiler: çimenlerde ot, gelincik ve karahindiba; kıyı kumunda
+        // şeker kamışı. En yüksek arazi sütununun üstüne konmaz ki küp mesh'i
+        // her zaman chunk'ın en yüksek bloğunu kapsasın.
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let wx = x0 + x;
+                let wz = z0 + z;
+                let h = self.height_at(wx, wz);
+                if h + 2 <= terrain_top {
+                    if let Some(plant) = wild_plant_at(wx, wz, h) {
+                        let idx = li(x as usize, z as usize, (h + 1) as usize);
+                        if data[idx] == AIR {
+                            data[idx] = plant;
+                        }
+                    }
+                }
             }
         }
 
@@ -259,13 +279,36 @@ impl World {
                     }
                 }
             }
-            if tree {
+            if tree || wild_plant_at(xi, zi, h).is_some() {
                 continue;
             }
             return [xi as f64 + 0.5, h as f64 + 1.02, zi as f64 + 0.5];
         }
         let h = self.height_at(0, 0);
         [0.5, h as f64 + 1.02, 0.5]
+    }
+}
+
+/// `(wx, wz)` yüzey yüksekliği `h` iken o sütunda doğal olarak çıkan yabani bitki.
+fn wild_plant_at(wx: i32, wz: i32, h: i32) -> Option<u8> {
+    if (wx, wz) == (-50, -50) {
+        return None;
+    }
+    let r = hash3f(wx, 11, wz);
+    if h == SEA_LEVEL || h == SEA_LEVEL + 1 {
+        if r > 0.965 { Some(SUGAR_CANE) } else { None }
+    } else if h > SEA_LEVEL + 1 {
+        if r > 0.985 {
+            Some(POPPY)
+        } else if r > 0.970 {
+            Some(DANDELION)
+        } else if r > 0.915 {
+            Some(TALL_GRASS)
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -647,5 +690,28 @@ mod tests {
         assert_eq!(w.get_block(x, h, z), SAND, "deniz tabanı kum olmalı");
         assert_eq!(w.get_block(x, SEA_LEVEL, z), WATER);
         assert_eq!(w.get_block(x, SEA_LEVEL + 1, z), AIR);
+    }
+
+    #[test]
+    fn wild_plants_spawn_on_grass_and_beaches() {
+        let mut w = world();
+        let (mut grass_plants, mut flowers, mut cane) = (0, 0, 0);
+        for cz in -3..=3 {
+            for cx in -3..=3 {
+                let key = w.generate_chunk(cx, cz);
+                let ch = &w.chunks[&key];
+                for &b in &ch.data {
+                    match b {
+                        TALL_GRASS => grass_plants += 1,
+                        POPPY | DANDELION => flowers += 1,
+                        SUGAR_CANE => cane += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(grass_plants > 20, "çimenlerde yabani ot üretilmeli: {grass_plants}");
+        assert!(flowers > 5, "çimenlerde gelincik ve karahindiba üretilmeli: {flowers}");
+        assert!(cane > 0, "kıyılarda şeker kamışı üretilmeli: {cane}");
     }
 }

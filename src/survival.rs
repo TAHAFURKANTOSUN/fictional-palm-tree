@@ -228,7 +228,8 @@ impl Survival {
         self.set_mode(next, inv);
     }
 
-    /// Elmayı yer. `true` dönerse bir adet harcanmıştır.
+    /// Seçili yiyeceği yer; mantar ayrıca zehri temizler (panzehir).
+    /// `true` dönerse bir adet harcanmıştır.
     pub fn try_eat(&mut self, inv: &mut Inventory) -> bool {
         let Some(stack) = inv.selected_stack() else {
             self.events.push(Event::NoFood);
@@ -242,13 +243,18 @@ impl Survival {
         if self.eat_cooldown > 0.0 {
             return false;
         }
-        if self.hunger >= MAX_HUNGER {
+        let cures_poison = stack.id == crate::blocks::MUSHROOM && self.poison > 0.0;
+        if self.hunger >= MAX_HUNGER && !cures_poison {
             self.events.push(Event::NotHungry);
             return false;
         }
         inv.consume_selected();
         self.hunger = (self.hunger + food).min(MAX_HUNGER);
         self.exhaustion = (self.exhaustion - 4.0).max(0.0);
+        if cures_poison {
+            self.poison = 0.0;
+            self.poison_tick = 0.0;
+        }
         self.eat_cooldown = 0.6;
         self.events.push(Event::Ate);
         true
@@ -720,5 +726,19 @@ mod tests {
         s.toggle_mode(&mut inv);
         assert!(!s.is_creative());
         assert_eq!(inv.snapshot(), before, "yaratıcı turu envanteri bozdu");
+    }
+
+    #[test]
+    fn mushroom_cures_poison_even_when_full() {
+        let mut s = Survival::new();
+        let mut inv = Inventory::new();
+        inv.slots[0] = Some(Stack::new(crate::blocks::MUSHROOM, 2));
+        inv.select(0);
+        s.poison_for(5.0);
+        assert!(s.poison > 0.0);
+        assert_eq!(s.hunger, MAX_HUNGER);
+        assert!(s.try_eat(&mut inv), "zehirliyken tok olsa bile mantar yenebilmeli");
+        assert_eq!(s.poison, 0.0, "mantar zehri temizlemeli");
+        assert_eq!(inv.count(crate::blocks::MUSHROOM), 1);
     }
 }

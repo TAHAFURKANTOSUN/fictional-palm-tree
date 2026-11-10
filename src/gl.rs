@@ -20,7 +20,7 @@ use web_sys::{
 };
 
 use crate::atlas::{ATLAS_COLS, ATLAS_H, ATLAS_W, TILE};
-use crate::effects::{BoxInst, Particle};
+use crate::effects::{build_unit_cube_verts, pack_box_instances, BoxInst, Particle, BOX_INSTANCE_BYTES};
 use crate::mat4::{self, Frustum};
 use crate::mesh::{MeshBuffers, MeshData, CORNER_SHIFT, FACES, VERTEX_BYTES};
 use crate::world::CHUNK_SIZE;
@@ -255,22 +255,35 @@ out vec4 fragColor;
 void main() { fragColor = vec4(v_col, 1.0); }
 "#;
 
-/// Düz renkli kutular (meşale, araba, şamandıra): köşeler CPU'da hazırlanır.
-/// Renk baytının alfası "kendi ışığını yayar" bayrağıdır (alev gece kararmaz).
+/// Düz renkli kutular (meşale, araba, şamandıra, canlılar): birim küp GPU'ya bir
+/// kez yüklenir, her kutu için yalnızca merkez, yarı boyut, açı ve renk
+/// gönderilir (`drawArraysInstanced`). Renk baytının alfası "kendi ışığını yayar"
+/// bayrağıdır (alev gece kararmaz).
 const BOX_VS: &str = r#"#version 300 es
-layout(location = 0) in vec3 a_pos;
-layout(location = 1) in vec4 a_col;
+layout(location = 0) in vec4 a_unit;
+layout(location = 1) in vec3 a_center;
+layout(location = 2) in vec3 a_half;
+layout(location = 3) in vec2 a_angles;
+layout(location = 4) in vec4 a_col;
 uniform mat4 u_viewProj;
 uniform float u_light;
 out vec3 v_col;
 void main() {
-  gl_Position = u_viewProj * vec4(a_pos, 1.0);
-  v_col = a_col.rgb * mix(max(u_light, 0.45), 1.0, a_col.a);
+  vec3 l = a_unit.xyz * a_half;
+  float sy = sin(a_angles.x), cy = cos(a_angles.x);
+  float sp = sin(a_angles.y), cp = cos(a_angles.y);
+  // Önce yerel X etrafında eğim (ön uç yukarı), sonra yön.
+  float ly = l.y * cp - l.z * sp;
+  float lz = l.y * sp + l.z * cp;
+  vec3 p = vec3(
+    a_center.x + l.x * cy + lz * sy,
+    a_center.y + ly,
+    a_center.z - l.x * sy + lz * cy
+  );
+  gl_Position = u_viewProj * vec4(p, 1.0);
+  v_col = (a_col.rgb * a_unit.w) * mix(max(u_light, 0.45), 1.0, a_col.a);
 }
 "#;
-
-/// Kutu köşesi başına bayt: konum (3×f32) + renk/bayrak (4×u8).
-const BOX_VERTEX_BYTES: usize = 16;
 
 /// Parçacık başına bayt: konum (3×f32) + boyut (f32) + renk (4×u8).
 const PARTICLE_BYTES: usize = 20;
@@ -554,16 +567,33 @@ impl Renderer {
         gl.enable_vertex_attrib_array(2);
         gl.vertex_attrib_pointer_with_i32(2, 3, GL::UNSIGNED_BYTE, true, stride, 16);
 
-        // --- kutular: parçacıklarla aynı gölgelendirici ---
+        // --- kutular: birim küp (köşe başına) + örnek tamponu (kutu başına) ---
         let box_prog = link(&gl, BOX_VS, PARTICLE_FS)?;
         let box_vao = gl.create_vertex_array().ok_or("kutu VAO oluşturulamadı")?;
+        let box_cube_vbo = gl.create_buffer().ok_or("birim küp tamponu oluşturulamadı")?;
         let box_vbo = gl.create_buffer().ok_or("kutu tamponu oluşturulamadı")?;
+        let unit_cube = build_unit_cube_verts();
         gl.bind_vertex_array(Some(&box_vao));
-        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&box_vbo));
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&box_cube_vbo));
+        let unit_cube_arr = js_sys::Float32Array::from(&unit_cube[..]);
+        gl.buffer_data_with_array_buffer_view(GL::ARRAY_BUFFER, &unit_cube_arr, GL::STATIC_DRAW);
         gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_with_i32(0, 3, GL::FLOAT, false, BOX_VERTEX_BYTES as i32, 0);
+        gl.vertex_attrib_pointer_with_i32(0, 4, GL::FLOAT, false, 16, 0);
+
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&box_vbo));
+        let inst_stride = BOX_INSTANCE_BYTES as i32;
         gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_with_i32(1, 4, GL::UNSIGNED_BYTE, true, BOX_VERTEX_BYTES as i32, 12);
+        gl.vertex_attrib_pointer_with_i32(1, 3, GL::FLOAT, false, inst_stride, 0);
+        gl.vertex_attrib_divisor(1, 1);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(2, 3, GL::FLOAT, false, inst_stride, 12);
+        gl.vertex_attrib_divisor(2, 1);
+        gl.enable_vertex_attrib_array(3);
+        gl.vertex_attrib_pointer_with_i32(3, 2, GL::FLOAT, false, inst_stride, 24);
+        gl.vertex_attrib_divisor(3, 1);
+        gl.enable_vertex_attrib_array(4);
+        gl.vertex_attrib_pointer_with_i32(4, 4, GL::UNSIGNED_BYTE, true, inst_stride, 32);
+        gl.vertex_attrib_divisor(4, 1);
         gl.bind_vertex_array(None);
 
         // Atlas her zaman 0. doku biriminde durur; örnekleyici bir kez ayarlanır.
@@ -855,48 +885,18 @@ impl Renderer {
         gl.draw_arrays(GL::TRIANGLES, 0, sky_vertices);
         gl.depth_mask(true);
 
-        // 2a) Kutular (meşale, araba, şamandıra): opak, derinliğe yazar.
+        // 2a) Kutular (meşale, araba, şamandıra, canlılar): opak, derinliğe yazar.
+        //     Birim küp GPU'da sabittir; yalnızca kutu başına 36 baytlık örnek
+        //     verisi gönderilir (`drawArraysInstanced`).
         if !fx.boxes.is_empty() {
-            bytes.clear();
-            for b in fx.boxes {
-                let (sin, cos) = b.yaw.sin_cos();
-                let (ps, pc) = b.pitch.sin_cos();
-                let rel = [
-                    (b.center[0] - cam_pos[0]) as f32,
-                    (b.center[1] - cam_pos[1]) as f32,
-                    (b.center[2] - cam_pos[2]) as f32,
-                ];
-                for face in FACES.iter() {
-                    let col = [
-                        (b.color[0] as f32 * face.shade) as u8,
-                        (b.color[1] as f32 * face.shade) as u8,
-                        (b.color[2] as f32 * face.shade) as u8,
-                        if b.glow { 255 } else { 0 },
-                    ];
-                    for corner in [0usize, 1, 2, 0, 2, 3] {
-                        let v = face.verts[corner];
-                        let lx = (v[0] as f32 * 2.0 - 1.0) * b.half[0];
-                        let y0 = (v[1] as f32 * 2.0 - 1.0) * b.half[1];
-                        let z0 = (v[2] as f32 * 2.0 - 1.0) * b.half[2];
-                        // Önce yerel X etrafında eğim (ön uç yukarı), sonra yön.
-                        let ly = y0 * pc - z0 * ps;
-                        let lz = y0 * ps + z0 * pc;
-                        // Yerel -Z, `yaw` ile oyuncunun ileri yönüne döner.
-                        let p = [rel[0] + lx * cos + lz * sin, rel[1] + ly, rel[2] - lx * sin + lz * cos];
-                        for c in p {
-                            bytes.extend_from_slice(&c.to_le_bytes());
-                        }
-                        bytes.extend_from_slice(&col);
-                    }
-                }
-            }
+            pack_box_instances(fx.boxes, cam_pos, &mut bytes);
             gl.use_program(Some(&self.box_prog));
             gl.uniform_matrix4fv_with_f32_array(self.b_view_proj.as_ref(), false, &view_proj);
             gl.uniform1f(self.b_light.as_ref(), self.light);
             gl.bind_vertex_array(Some(&self.box_vao));
             gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.box_vbo));
             gl.buffer_data_with_u8_array(GL::ARRAY_BUFFER, &bytes, GL::DYNAMIC_DRAW);
-            gl.draw_arrays(GL::TRIANGLES, 0, (fx.boxes.len() * 36) as i32);
+            gl.draw_arrays_instanced(GL::TRIANGLES, 0, 36, fx.boxes.len() as i32);
             gl.bind_buffer(GL::ARRAY_BUFFER, None);
         }
 

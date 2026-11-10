@@ -12,9 +12,10 @@ pub fn break_time(id: u8) -> Option<f64> {
     match id {
         AIR | WATER | BEDROCK => None,
         TORCH => Some(0.08),
+        id if is_plant(id) => Some(0.08),
         LEAVES => Some(0.25),
         GLASS => Some(0.35),
-        GRASS | DIRT | SAND => Some(0.55),
+        GRASS | DIRT | SAND | FARMLAND => Some(0.55),
         LOG | PLANKS | CRAFT_TABLE => Some(0.9),
         STONE | COBBLE | BRICK => Some(1.3),
         _ => Some(0.6),
@@ -57,7 +58,7 @@ impl Mining {
     }
 }
 
-/// Chunk mesh'i dışında çizilen düz renkli kutu (meşale, araba, şamandıra).
+/// Chunk mesh'i dışında çizilen düz renkli kutu (meşale, araba, şamandıra, canlılar).
 #[derive(Clone, Copy, Debug)]
 pub struct BoxInst {
     pub center: [f64; 3],
@@ -72,6 +73,51 @@ pub struct BoxInst {
     pub color: [u8; 3],
     /// Kendi ışığını yayar: gece kararmaz (alev).
     pub glow: bool,
+}
+
+/// Kutu örneği (instance) başına GPU'ya gönderilen bayt sayısı:
+/// kameraya göre merkez (`3×f32`) + yarı boyut (`3×f32`) + yön/eğim (`2×f32`) + renk/parlama (`4×u8`).
+pub const BOX_INSTANCE_BYTES: usize = 36;
+
+/// `drawArraysInstanced` için birim küpün 36 köşesini (`[-1, +1]³` yerel konum + yüz gölgesi) üretir.
+/// Bir kez GPU'ya yüklenir (`STATIC_DRAW`); tüm kutular bu ortak geometriyi paylaşır.
+pub fn build_unit_cube_verts() -> Vec<f32> {
+    let mut out = Vec::with_capacity(36 * 4);
+    for face in crate::mesh::FACES.iter() {
+        for corner in [0usize, 1, 2, 0, 2, 3] {
+            let v = face.verts[corner];
+            out.extend_from_slice(&[
+                v[0] as f32 * 2.0 - 1.0,
+                v[1] as f32 * 2.0 - 1.0,
+                v[2] as f32 * 2.0 - 1.0,
+                face.shade,
+            ]);
+        }
+    }
+    out
+}
+
+/// Kutu örneklerini (`BoxInst`) GPU örnek tamponuna (`BOX_INSTANCE_BYTES` adım) paketler.
+/// Köşe döndürme ve trigonometri CPU'da yapılmaz; köşe gölgelendiricisi üstlenir.
+pub fn pack_box_instances(boxes: &[BoxInst], cam_pos: [f64; 3], bytes: &mut Vec<u8>) {
+    bytes.clear();
+    bytes.reserve(boxes.len() * BOX_INSTANCE_BYTES);
+    for b in boxes {
+        let rel = [
+            (b.center[0] - cam_pos[0]) as f32,
+            (b.center[1] - cam_pos[1]) as f32,
+            (b.center[2] - cam_pos[2]) as f32,
+        ];
+        for c in rel {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        for h in b.half {
+            bytes.extend_from_slice(&h.to_le_bytes());
+        }
+        bytes.extend_from_slice(&b.yaw.to_le_bytes());
+        bytes.extend_from_slice(&b.pitch.to_le_bytes());
+        bytes.extend_from_slice(&[b.color[0], b.color[1], b.color[2], if b.glow { 255 } else { 0 }]);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -118,7 +164,7 @@ impl Particles {
         let tile = block_def(id).side as usize;
         for _ in 0..PARTICLES_PER_BREAK {
             if self.list.len() >= MAX_PARTICLES {
-                self.list.remove(0);
+                self.list.swap_remove(0);
             }
             // Dokudan rastgele bir piksel; saydam pikseller (cam) atlanır.
             let mut color = [200, 200, 200];
@@ -168,7 +214,7 @@ impl Particles {
     /// küçük bir rastgele sapma katılır.
     pub fn puff(&mut self, pos: [f64; 3], vel: [f64; 3], spread: f64, color: [u8; 3], life: f64, size: f32, gravity: f32) {
         if self.list.len() >= MAX_PARTICLES {
-            self.list.remove(0);
+            self.list.swap_remove(0);
         }
         let vel = [
             vel[0] + (self.rand() - 0.5) * spread,
@@ -311,5 +357,68 @@ mod tests {
             p.spawn_break(8, h + 2, 8, STONE, &atlas);
         }
         assert!(p.list.len() <= MAX_PARTICLES);
+    }
+
+    #[test]
+    fn instanced_box_transform_matches_cpu_vertex_expansion() {
+        let cam = [10.0, 20.0, -5.0];
+        let b = BoxInst {
+            center: [12.5, 21.2, -3.4],
+            half: [0.34, 0.30, 0.52],
+            yaw: 0.85,
+            pitch: -0.22,
+            color: [236, 164, 120],
+            glow: true,
+        };
+        let mut bytes = Vec::new();
+        pack_box_instances(&[b], cam, &mut bytes);
+        assert_eq!(bytes.len(), BOX_INSTANCE_BYTES);
+
+        let f32_at = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        let a_center = [f32_at(0), f32_at(4), f32_at(8)];
+        let a_half = [f32_at(12), f32_at(16), f32_at(20)];
+        let a_angles = [f32_at(24), f32_at(28)];
+        assert_eq!(&bytes[32..36], &[236, 164, 120, 255]);
+
+        let unit = build_unit_cube_verts();
+        assert_eq!(unit.len(), 36 * 4);
+
+        let (sin, cos) = b.yaw.sin_cos();
+        let (ps, pc) = b.pitch.sin_cos();
+        let rel = [
+            (b.center[0] - cam[0]) as f32,
+            (b.center[1] - cam[1]) as f32,
+            (b.center[2] - cam[2]) as f32,
+        ];
+        let mut vi = 0;
+        for face in crate::mesh::FACES.iter() {
+            for corner in [0usize, 1, 2, 0, 2, 3] {
+                let v = face.verts[corner];
+                let lx = (v[0] as f32 * 2.0 - 1.0) * b.half[0];
+                let y0 = (v[1] as f32 * 2.0 - 1.0) * b.half[1];
+                let z0 = (v[2] as f32 * 2.0 - 1.0) * b.half[2];
+                let ly = y0 * pc - z0 * ps;
+                let lz = y0 * ps + z0 * pc;
+                let cpu_p = [rel[0] + lx * cos + lz * sin, rel[1] + ly, rel[2] - lx * sin + lz * cos];
+
+                // Gölgelendiricideki dönüşüm:
+                let u = &unit[vi * 4..vi * 4 + 4];
+                let l = [u[0] * a_half[0], u[1] * a_half[1], u[2] * a_half[2]];
+                let (sy, cy) = a_angles[0].sin_cos();
+                let (sp, cp) = a_angles[1].sin_cos();
+                let gly = l[1] * cp - l[2] * sp;
+                let glz = l[1] * sp + l[2] * cp;
+                let gpu_p = [
+                    a_center[0] + l[0] * cy + glz * sy,
+                    a_center[1] + gly,
+                    a_center[2] - l[0] * sy + glz * cy,
+                ];
+                for axis in 0..3 {
+                    assert!((cpu_p[axis] - gpu_p[axis]).abs() < 1e-5, "köşe {vi} eksen {axis}: cpu={} gpu={}", cpu_p[axis], gpu_p[axis]);
+                }
+                assert!((u[3] - face.shade).abs() < 1e-6);
+                vi += 1;
+            }
+        }
     }
 }

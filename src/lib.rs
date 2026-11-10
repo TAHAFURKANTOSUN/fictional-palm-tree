@@ -14,6 +14,7 @@ pub mod atlas;
 pub mod blocks;
 pub mod crafting;
 pub mod effects;
+pub mod farming;
 pub mod fishing;
 pub mod inventory;
 pub mod mat4;

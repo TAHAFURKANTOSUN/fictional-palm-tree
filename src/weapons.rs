@@ -1,7 +1,7 @@
 //! Silahlar: dürbünsüz tabanca ve dürbünlü tüfek. Saf kurallar (atış aralığı,
 //! geri tepme, yakınlaştırma); çizimi ve ışın izlemeyi `app` yapar.
 
-use crate::blocks::{GLASS, LEAVES, PISTOL, SNIPER, TORCH};
+use crate::blocks::{is_plant, GLASS, LEAVES, PISTOL, SNIPER, TORCH};
 
 pub struct Weapon {
     /// İki atış arasındaki en kısa süre (saniye).
@@ -30,7 +30,7 @@ pub fn weapon(id: u16) -> Option<&'static Weapon> {
 
 /// Mermi bu bloğu kırar mı? (Yalnızca kırılgan bloklar; taş, toprak vb. sağlam kalır.)
 pub fn shatters(block: u8) -> bool {
-    matches!(block, GLASS | LEAVES | TORCH)
+    matches!(block, GLASS | LEAVES | TORCH) || is_plant(block)
 }
 
 /// Eldeki silahın anlık durumu.

@@ -157,15 +157,23 @@
       s.start(t);
     }
     const SOUNDS = {
-      sheep_idle:   (c, v) => tone(c, 'sawtooth', 520, 430, 0.55, v, 0, 9),
-      sheep_hurt:   (c, v) => tone(c, 'sawtooth', 720, 480, 0.3, v, 0, 14),
-      pig_idle:     (c, v) => { tone(c, 'square', 170, 120, 0.13, v); tone(c, 'square', 190, 110, 0.16, v, 0.17); },
-      pig_hurt:     (c, v) => tone(c, 'sawtooth', 620, 300, 0.32, v, 0, 20),
-      chicken_idle: (c, v) => { for (let i = 0; i < 3; i++) tone(c, 'triangle', 900, 1350, 0.06, v, i * 0.11); },
-      chicken_hurt: (c, v) => tone(c, 'triangle', 1500, 800, 0.22, v, 0, 30),
-      zombie_idle:  (c, v) => tone(c, 'sawtooth', 110, 70, 0.9, v, 0, 5),
-      zombie_alert: (c, v) => { tone(c, 'sawtooth', 150, 85, 0.7, v * 1.3, 0, 7); noise(c, 0.5, v * 0.4, 400); },
-      zombie_hurt:  (c, v) => tone(c, 'sawtooth', 170, 80, 0.3, v),
+      sheep_idle:   (c, v) => { tone(c, 'triangle', 340, 285, 0.58, v, 0, 11); tone(c, 'sawtooth', 680, 570, 0.52, v * 0.35, 0.02, 11); },
+      sheep_hurt:   (c, v) => { tone(c, 'triangle', 480, 320, 0.32, v, 0, 15); tone(c, 'sawtooth', 960, 640, 0.28, v * 0.4, 0, 15); },
+      pig_idle:     (c, v) => { tone(c, 'square', 155, 110, 0.13, v * 0.8); tone(c, 'square', 175, 105, 0.16, v * 0.8, 0.16); },
+      pig_hurt:     (c, v) => tone(c, 'sawtooth', 580, 280, 0.32, v, 0, 20),
+      chicken_idle: (c, v) => { for (let i = 0; i < 3; i++) tone(c, 'triangle', 860, 1280, 0.06, v * 0.85, i * 0.11); },
+      chicken_hurt: (c, v) => tone(c, 'triangle', 1400, 760, 0.22, v, 0, 28),
+      cow_idle:     (c, v) => { tone(c, 'sawtooth', 128, 96, 0.78, v * 0.75, 0, 5); tone(c, 'triangle', 256, 192, 0.72, v * 0.45, 0.03, 5); },
+      cow_hurt:     (c, v) => { tone(c, 'sawtooth', 180, 110, 0.42, v * 0.9, 0, 9); },
+      zombie_idle:  (c, v) => { tone(c, 'sawtooth', 95, 62, 0.85, v * 0.9, 0, 5); noise(c, 0.65, v * 0.3, 280, 'lowpass'); },
+      zombie_alert: (c, v) => { tone(c, 'sawtooth', 135, 72, 0.72, v * 1.2, 0, 6); noise(c, 0.55, v * 0.45, 360, 'bandpass'); },
+      zombie_hurt:  (c, v) => { tone(c, 'sawtooth', 155, 75, 0.28, v); noise(c, 0.2, v * 0.35, 420, 'bandpass'); },
+      spider_idle:  (c, v) => { noise(c, 0.22, v * 0.65, 3200, 'bandpass'); noise(c, 0.16, v * 0.5, 4200, 'bandpass', 0.14); },
+      spider_alert: (c, v) => { noise(c, 0.35, v * 0.95, 2800, 'bandpass'); tone(c, 'sawtooth', 260, 140, 0.25, v * 0.45); },
+      spider_hurt:  (c, v) => { noise(c, 0.24, v * 0.9, 3600, 'bandpass'); tone(c, 'triangle', 420, 180, 0.18, v * 0.5); },
+      skeleton_idle:(c, v) => { tone(c, 'square', 920, 640, 0.045, v * 0.6); tone(c, 'square', 1120, 760, 0.045, v * 0.55, 0.07); },
+      skeleton_shoot:(c, v)=> { noise(c, 0.12, v * 0.85, 2200, 'bandpass'); tone(c, 'triangle', 520, 210, 0.14, v * 0.7); },
+      skeleton_hurt:(c, v) => { tone(c, 'square', 1080, 520, 0.07, v * 0.8); tone(c, 'square', 840, 440, 0.08, v * 0.7, 0.06); },
       shroom_idle:  (c, v) => { tone(c, 'sine', 320, 250, 0.3, v); tone(c, 'sine', 250, 330, 0.25, v, 0.3); },
       shroom_spit:  (c, v) => { noise(c, 0.28, v, 2600); tone(c, 'sine', 700, 200, 0.2, v * 0.6); },
       shroom_hurt:  (c, v) => tone(c, 'sine', 520, 240, 0.25, v),
@@ -180,6 +188,44 @@
         const c = audio(), play = SOUNDS[name];
         if (c && play && volume > 0) play(c, Math.min(volume, 1) * 0.22);
       } catch (e) { /* ses yoksa oyun sessiz sürer */ }
+    };
+    window.__saveMobs = function (bytes) {
+      try {
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        localStorage.setItem('voxelcraft_mobs', btoa(bin));
+      } catch (e) { /* depolama kapalıysa sessizce geç */ }
+    };
+    window.__loadMobs = function () {
+      try {
+        const b64 = localStorage.getItem('voxelcraft_mobs');
+        if (!b64) return new Uint8Array(0);
+        const bin = atob(b64);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      } catch (e) {
+        return new Uint8Array(0);
+      }
+    };
+    window.__saveFarming = function (bytes) {
+      try {
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        localStorage.setItem('voxelcraft_farming', btoa(bin));
+      } catch (e) { /* depolama kapalıysa sessizce geç */ }
+    };
+    window.__loadFarming = function () {
+      try {
+        const b64 = localStorage.getItem('voxelcraft_farming');
+        if (!b64) return new Uint8Array(0);
+        const bin = atob(b64);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      } catch (e) {
+        return new Uint8Array(0);
+      }
     };
   })();
 </script>

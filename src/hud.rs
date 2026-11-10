@@ -471,6 +471,18 @@ impl Hud {
                 ctx.fill_rect(x + size * 0.70, y + size * 0.62, size * 0.20, size * 0.10);
                 ctx.fill_rect(x + size * 0.84, y + size * 0.56, size * 0.08, size * 0.22);
             }
+            Icon::Mantar => {
+                // Sap + beyaz benekli kırmızı şapka.
+                ctx.set_fill_style_str("#e2d6ba");
+                ctx.fill_rect(x + size * 0.38, y + size * 0.50, size * 0.24, size * 0.38);
+                ctx.set_fill_style_str("#c82c28");
+                ctx.fill_rect(x + size * 0.14, y + size * 0.28, size * 0.72, size * 0.26);
+                ctx.fill_rect(x + size * 0.24, y + size * 0.16, size * 0.52, size * 0.16);
+                ctx.set_fill_style_str("#f6f6f0");
+                ctx.fill_rect(x + size * 0.24, y + size * 0.34, size * 0.12, size * 0.12);
+                ctx.fill_rect(x + size * 0.62, y + size * 0.32, size * 0.14, size * 0.12);
+                ctx.fill_rect(x + size * 0.44, y + size * 0.20, size * 0.12, size * 0.10);
+            }
             Icon::Tabanca => {
                 ctx.set_fill_style_str("#3c4048");
                 ctx.fill_rect(x + size * 0.14, y + size * 0.32, size * 0.70, size * 0.18);
@@ -498,6 +510,87 @@ impl Hud {
                 ctx.set_fill_style_str("#1c1c1c");
                 ctx.fill_rect(x + size * 0.14, y + size * 0.66, size * 0.20, size * 0.20);
                 ctx.fill_rect(x + size * 0.64, y + size * 0.66, size * 0.20, size * 0.20);
+            }
+            Icon::Capa => {
+                let step = size / 8.0;
+                ctx.set_fill_style_str("#8b6232");
+                for i in 0..7 {
+                    ctx.fill_rect(x + size * 0.12 + i as f64 * step, y + size * 0.80 - i as f64 * step, step * 1.15, step * 1.15);
+                }
+                ctx.set_fill_style_str("#c29b61");
+                ctx.fill_rect(x + size * 0.46, y + size * 0.12, size * 0.42, size * 0.16);
+                ctx.fill_rect(x + size * 0.72, y + size * 0.28, size * 0.14, size * 0.16);
+            }
+            Icon::Tohum => {
+                ctx.set_fill_style_str("#6ea838");
+                for (dx, dy) in [(0.22, 0.56), (0.48, 0.32), (0.64, 0.58), (0.34, 0.28), (0.44, 0.68)] {
+                    ctx.fill_rect(x + size * dx, y + size * dy, size * 0.14, size * 0.18);
+                }
+                ctx.set_fill_style_str("#b6c952");
+                for (dx, dy) in [(0.26, 0.58), (0.52, 0.34), (0.68, 0.60)] {
+                    ctx.fill_rect(x + size * dx, y + size * dy, size * 0.07, size * 0.09);
+                }
+            }
+            Icon::Bugday => {
+                ctx.set_fill_style_str("#d9b448");
+                for dx in [0.22, 0.44, 0.66] {
+                    ctx.fill_rect(x + size * dx, y + size * 0.16, size * 0.12, size * 0.68);
+                }
+                ctx.set_fill_style_str("#a8742a");
+                ctx.fill_rect(x + size * 0.18, y + size * 0.52, size * 0.64, size * 0.12);
+            }
+            Icon::Ekmek => {
+                ctx.set_fill_style_str("#b8732a");
+                ctx.fill_rect(x + size * 0.14, y + size * 0.36, size * 0.72, size * 0.36);
+                ctx.fill_rect(x + size * 0.22, y + size * 0.28, size * 0.56, size * 0.48);
+                ctx.set_fill_style_str("#e3a854");
+                ctx.fill_rect(x + size * 0.22, y + size * 0.34, size * 0.56, size * 0.26);
+            }
+            Icon::Kemik => {
+                let step = size / 8.0;
+                ctx.set_fill_style_str("#ece8dc");
+                for i in 1..7 {
+                    ctx.fill_rect(x + size * 0.14 + i as f64 * step, y + size * 0.76 - i as f64 * step, step * 1.3, step * 1.3);
+                }
+                ctx.fill_rect(x + size * 0.12, y + size * 0.68, size * 0.20, size * 0.20);
+                ctx.fill_rect(x + size * 0.68, y + size * 0.12, size * 0.20, size * 0.20);
+            }
+            Icon::Seker => {
+                ctx.set_fill_style_str("#f4f6fa");
+                ctx.fill_rect(x + size * 0.24, y + size * 0.44, size * 0.52, size * 0.32);
+                ctx.fill_rect(x + size * 0.34, y + size * 0.30, size * 0.32, size * 0.44);
+                ctx.set_fill_style_str("#d5dce6");
+                ctx.fill_rect(x + size * 0.24, y + size * 0.66, size * 0.52, size * 0.10);
+            }
+            Icon::Ot => {
+                ctx.set_fill_style_str("#56a63e");
+                for (dx, h) in [(0.18, 0.48), (0.36, 0.66), (0.54, 0.56), (0.72, 0.42)] {
+                    ctx.fill_rect(x + size * dx, y + size * (0.86 - h), size * 0.10, size * h);
+                }
+            }
+            Icon::Gelincik => {
+                ctx.set_fill_style_str("#458f32");
+                ctx.fill_rect(x + size * 0.44, y + size * 0.46, size * 0.12, size * 0.42);
+                ctx.set_fill_style_str("#d9322a");
+                ctx.fill_rect(x + size * 0.28, y + size * 0.18, size * 0.44, size * 0.30);
+                ctx.set_fill_style_str("#261818");
+                ctx.fill_rect(x + size * 0.44, y + size * 0.28, size * 0.12, size * 0.10);
+            }
+            Icon::Karahindiba => {
+                ctx.set_fill_style_str("#458f32");
+                ctx.fill_rect(x + size * 0.44, y + size * 0.46, size * 0.12, size * 0.42);
+                ctx.set_fill_style_str("#f0cf35");
+                ctx.fill_rect(x + size * 0.28, y + size * 0.18, size * 0.44, size * 0.28);
+                ctx.set_fill_style_str("#fff28c");
+                ctx.fill_rect(x + size * 0.38, y + size * 0.24, size * 0.24, size * 0.14);
+            }
+            Icon::SekerKamisi => {
+                ctx.set_fill_style_str("#7cc94c");
+                for dx in [0.22, 0.44, 0.66] {
+                    ctx.fill_rect(x + size * dx, y + size * 0.14, size * 0.12, size * 0.72);
+                }
+                ctx.set_fill_style_str("#569632");
+                ctx.fill_rect(x + size * 0.20, y + size * 0.46, size * 0.60, size * 0.08);
             }
         }
     }

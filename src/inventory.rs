@@ -1,8 +1,8 @@
 //! 36 yuvalı envanter: 0-8 kısayol çubuğu, 9-35 sırt çantası.
 
 use crate::blocks::{
-    item_def, APPLE, BRICK, COBBLE, CRAFT_TABLE, DIRT, GLASS, GRASS, LEAVES, LOG, PLANKS, SAND,
-    STONE, TORCH, WATER,
+    item_def, APPLE, BRICK, COBBLE, CRAFT_TABLE, DIRT, GLASS, GRASS, HOE, LEAVES, LOG, PLANKS,
+    SAND, SEEDS, STONE, TORCH, WATER,
 };
 
 pub const INV_SIZE: usize = 36;
@@ -143,6 +143,8 @@ impl Inventory {
             (APPLE, 3), // kısayolun 9. yuvası — hemen yiyebilmek için
             (GLASS as u16, 6),
             (TORCH as u16, 4),
+            (HOE, 1),
+            (SEEDS, 4),
         ] {
             self.add(id, n);
         }

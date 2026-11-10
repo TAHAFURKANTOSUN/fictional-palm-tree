@@ -13,9 +13,12 @@ use web_sys::{
     Window,
 };
 
-use crate::blocks::{item_def, item_name, APPLE, CAR, FISH, FISHING_ROD, MEAT, TORCH};
+use crate::blocks::{
+    is_plant, item_def, item_name, APPLE, BONE, CAR, FARMLAND, FISH, FISHING_ROD, HOE, SEEDS, TORCH,
+};
 use crate::crafting::{self, FillError, Grid};
 use crate::effects::{BoxInst, Mining, Particles};
+use crate::farming::Farming;
 use crate::fishing::{find_water, Fishing, Phase, CAST_RANGE};
 use crate::vehicle::{Car, Controls};
 use crate::weapons::{shatters, weapon, Gun, Weapon};
@@ -23,7 +26,7 @@ use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
 use crate::mesh::{self, MeshBuffers};
-use crate::mobs::{Kind, MobEvent, Mobs, Sound, State, POISON_TIME};
+use crate::mobs::{Kind, MobEvent, Mobs, Sound, POISON_TIME};
 use crate::pacing::QualityGovernor;
 use crate::player::{Player, REACH};
 use crate::raycast::raycast_voxel;
@@ -125,6 +128,11 @@ struct Game {
     fov_kick: f32,
     mobs: Mobs,
     mob_events: Vec<MobEvent>,
+    mob_save_timer: f64,
+    farming: Farming,
+    farm_changed: Vec<[i32; 3]>,
+    /// Çevredeki bitki ve ekin bloklarının önbelleği (`refresh_torches` ile yenilenir).
+    plants: Vec<([i32; 3], u8)>,
     gun: Gun,
     /// Sağ tık basılı (dürbünlü silahta nişan).
     aim_held: bool,
@@ -373,10 +381,28 @@ impl Game {
             return;
         }
 
+        let plant = is_plant(id);
+        let mut toast_msg = None;
         if !self.survival.is_creative() {
-            if self.inv.add(id as u16, 1) > 0 {
-                self.hud.toast("Envanter dolu!");
-                return;
+            if plant {
+                let drops = Farming::harvest_drops(id, js_random());
+                for (drop_id, count) in drops {
+                    let left = self.inv.add(drop_id, count);
+                    if left < count {
+                        let gained = count - left;
+                        toast_msg = Some(if gained > 1 {
+                            format!("+{} ×{}", item_name(drop_id), gained)
+                        } else {
+                            format!("+{}", item_name(drop_id))
+                        });
+                    }
+                }
+            } else {
+                if self.inv.add(id as u16, 1) > 0 {
+                    self.hud.toast("Envanter dolu!");
+                    return;
+                }
+                toast_msg = Some(format!("+{}", item_name(id as u16)));
             }
             self.broke_block = true;
             if id == crate::blocks::LEAVES && js_random() < 0.14 {
@@ -384,12 +410,17 @@ impl Game {
             }
         }
 
+        let prev_plots = self.farming.plots.len();
+        let target_pos = crate::protocol::Position { x: hit.x, y: hit.y, z: hit.z };
+        self.farming.plots.retain(|p| p.pos != target_pos);
+        if self.farming.plots.len() != prev_plots {
+            self.save_farming();
+        }
         self.world.set_block_raw(hit.x, hit.y, hit.z, crate::blocks::AIR);
         self.torches_dirty = true;
         self.remesh_around(hit.x, hit.y, hit.z);
         self.particles.spawn_break(hit.x, hit.y, hit.z, id, &self.atlas_pixels);
-        if !self.survival.is_creative() {
-            let msg = format!("+{}", item_name(id as u16));
+        if let Some(msg) = toast_msg {
             self.hud.toast(msg);
         }
     }
@@ -490,25 +521,44 @@ impl Game {
         }
     }
 
-    /// Canlıları ilerletir ve olanları (saldırı, ölüm) oyuna uygular.
+    /// Canlıları ve tarım ekinlerini ilerletir; olanları oyuna uygular.
     fn update_mobs(&mut self, dt: f64) {
+        if self.torches_dirty {
+            self.refresh_torches();
+        }
+        // Ekin büyümesi: olgunlaşan ekinler görsel listeyi ve kaydı yeniler.
+        let mut farm_changed = std::mem::take(&mut self.farm_changed);
+        self.farming.tick(&mut self.world, dt, &mut farm_changed);
+        if !farm_changed.is_empty() {
+            self.torches_dirty = true;
+            self.save_farming();
+        }
+        self.farm_changed = farm_changed;
+
+        let held_item = self.inv.selected_stack().map(|s| s.id);
+        self.mobs.lure_with_item(self.player.pos, held_item);
+
         let night = sky_state(self.day_time).light < 0.5;
         let mut events = std::mem::take(&mut self.mob_events);
         events.clear();
-        self.mobs.tick(&self.world, dt, self.player.pos, night, &mut events);
+        self.mobs.tick(&self.world, dt, self.player.pos, night, &self.torches, &mut events);
+        let mut save_dirty = false;
         for ev in events.iter() {
             match *ev {
-                MobEvent::Attack(damage) => self.survival.damage(damage, "zombi"),
+                MobEvent::Attack(damage) => self.survival.damage(damage, "yaratık"),
+                MobEvent::ArrowHit(damage) => self.survival.damage(damage, "iskelet oku"),
                 MobEvent::Sound(kind, sound, pos) => {
                     let what = match sound {
                         Sound::Idle => "idle",
                         Sound::Hurt => "hurt",
                         Sound::Alert => "alert",
                         Sound::Spit => "spit",
+                        Sound::Shoot => "shoot",
                     };
                     self.play_at(&format!("{}_{}", kind.key(), what), pos);
                 }
                 MobEvent::Born(_, pos) => {
+                    save_dirty = true;
                     self.play_at("born", pos);
                     for _ in 0..10 {
                         self.particles.puff([pos[0], pos[1] + 0.6, pos[2]], [0.0, 1.2, 0.0], 1.6, [255, 120, 160], 0.9, 0.07, -0.03);
@@ -527,26 +577,54 @@ impl Game {
                     }
                 }
                 MobEvent::Died(kind, pos) => {
+                    save_dirty = true;
                     let stats = kind.stats();
-                    let color = if kind == Kind::Zombie { [70, 120, 70] } else { [230, 225, 215] };
                     for _ in 0..16 {
-                        self.particles.puff([pos[0], pos[1] + stats.height * 0.5, pos[2]], [0.0, 2.0, 0.0], 3.5, color, 0.6, 0.08, 0.6);
+                        self.particles.puff([pos[0], pos[1] + stats.height * 0.5, pos[2]], [0.0, 2.0, 0.0], 3.5, stats.color, 0.6, 0.08, 0.6);
                     }
-                    if stats.meat > 0 && !self.survival.is_creative() && self.inv.add(MEAT, stats.meat) < stats.meat {
-                        self.hud.toast("+Et");
+                    if let Some((item, count)) = stats.drop {
+                        if !self.survival.is_creative() {
+                            let left = self.inv.add(item, count);
+                            if left < count {
+                                let gained = count - left;
+                                let msg = if gained > 1 {
+                                    format!("+{} ×{}", item_name(item), gained)
+                                } else {
+                                    format!("+{}", item_name(item))
+                                };
+                                self.hud.toast(msg);
+                            }
+                        }
                     }
                 }
             }
         }
         self.mob_events = events;
 
+        self.mob_save_timer -= dt;
+        if save_dirty || self.mob_save_timer <= 0.0 {
+            self.mob_save_timer = 5.0;
+            self.save_mobs();
+        }
+
         // Uçan tükürüklerin arkasında zehir izi.
         for i in 0..self.mobs.spits.len() {
+            if self.mobs.spits[i].arrow {
+                continue;
+            }
             let pos = self.mobs.spits[i].pos;
             if self.particles.chance(40.0, dt) {
                 self.particles.puff(pos, [0.0; 3], 0.5, [130, 220, 80], 0.3, 0.05, 0.1);
             }
         }
+    }
+
+    fn save_mobs(&self) {
+        save_mobs_storage(&self.mobs.to_bytes());
+    }
+
+    fn save_farming(&self) {
+        save_farming_storage(&self.farming.to_bytes());
     }
 
     /// Ateş: mermi anında gider (ışın). İsabet ettiği bloktan kırıntı saçar,
@@ -607,6 +685,71 @@ impl Game {
         if weapon(id).is_some() {
             return;
         }
+        // Yakındaki bir hayvana yemle sağ tıklanırsa beslenir ve üreme hazır olur.
+        let (eye, d) = (self.player.eye(), self.player.look_dir());
+        let wall = self.block_ray(REACH).map(|b| b.2).unwrap_or(f64::MAX);
+        if let Some((i, _)) = self.mobs.ray_hit(eye, d, 3.6).filter(|&(_, t)| t < wall) {
+            if self.mobs.feed(i, id) {
+                let pos = self.mobs.list[i].body.pos;
+                if !self.survival.is_creative() {
+                    self.inv.consume_selected();
+                }
+                self.play_at("born", pos);
+                for _ in 0..8 {
+                    self.particles.puff([pos[0], pos[1] + 0.7, pos[2]], [0.0, 1.1, 0.0], 1.4, [255, 110, 150], 0.85, 0.065, -0.02);
+                }
+                self.hud.toast("Hayvan beslendi");
+                self.save_mobs();
+                return;
+            }
+        }
+        // Çapa: çimen veya toprağı sürülmüş toprağa dönüştürür.
+        if id == HOE {
+            if let Some(hit) = self.target() {
+                if Farming::till(&mut self.world, hit.x, hit.y, hit.z) {
+                    self.torches_dirty = true;
+                    self.remesh_around(hit.x, hit.y, hit.z);
+                    self.particles.spawn_break(hit.x, hit.y, hit.z, FARMLAND, &self.atlas_pixels);
+                    self.hud.toast("Toprak sürüldü — tohum ekebilirsin");
+                    return;
+                }
+            }
+            self.hud.toast("Çapa için çimen veya toprağa sağ tıkla");
+            return;
+        }
+        // Tohum: sürülmüş toprağın üstüne buğday eker.
+        if id == SEEDS {
+            if let Some(hit) = self.target() {
+                if self.farming.plant_seeds(&mut self.world, hit.x, hit.y, hit.z) {
+                    if !self.survival.is_creative() {
+                        self.inv.consume_selected();
+                    }
+                    self.torches_dirty = true;
+                    self.save_farming();
+                    self.hud.toast("Buğday tohumu ekildi");
+                    return;
+                }
+            }
+            self.hud.toast("Tohum yalnızca sürülmüş toprağa ekilir");
+            return;
+        }
+        // Kemik: ekini bir evre büyütür (gübre / kemik tozu).
+        if id == BONE {
+            if let Some(hit) = self.target() {
+                if let Some([cx, cy, cz]) = self.farming.fertilize(&mut self.world, hit.x, hit.y, hit.z) {
+                    if !self.survival.is_creative() {
+                        self.inv.consume_selected();
+                    }
+                    self.torches_dirty = true;
+                    self.save_farming();
+                    for _ in 0..10 {
+                        self.particles.puff([cx as f64 + 0.5, cy as f64 + 0.4, cz as f64 + 0.5], [0.0, 1.0, 0.0], 1.5, [110, 225, 95], 0.7, 0.06, -0.02);
+                    }
+                    self.hud.toast("Ekin gübrelendi");
+                    return;
+                }
+            }
+        }
         if item_def(id).is_some_and(|d| d.food > 0) {
             self.survival.try_eat(&mut self.inv);
         } else if id == FISHING_ROD {
@@ -619,29 +762,40 @@ impl Game {
     }
 
     // ---------------------------------------------------------------
-    // Meşale, olta, araba
+    // Meşale, bitki, olta, araba
     // ---------------------------------------------------------------
 
-    /// Oyuncunun çevresindeki (±4 chunk) meşaleleri oyuncu düzenlemelerinden
-    /// toplar. Meşaleler yalnızca oyuncu tarafından konur, bu yüzden düzenleme
-    /// kayıtlarına bakmak yeterlidir; blok değişince ya da chunk sınırı
-    /// geçilince yenilenir.
+    /// Oyuncunun çevresindeki meşaleleri ve bitkileri toplar; blok değişince
+    /// ya da chunk sınırı geçilince yenilenir.
     fn refresh_torches(&mut self) {
         self.torches_dirty = false;
         self.torch_sort_cell = None;
         self.torches.clear();
+        self.plants.clear();
         let size = CHUNK_SIZE as usize;
         for dz in -4..=4 {
             for dx in -4..=4 {
                 let (cx, cz) = (self.last_pcx + dx, self.last_pcz + dz);
-                let Some(edits) = self.world.edits.get(&ckey(cx, cz)) else { continue };
-                for (&idx, &v) in edits {
-                    if v == TORCH {
-                        self.torches.push([
-                            cx * CHUNK_SIZE + (idx % size) as i32,
-                            (idx / (size * size)) as i32,
-                            cz * CHUNK_SIZE + (idx / size % size) as i32,
-                        ]);
+                if let Some(edits) = self.world.edits.get(&ckey(cx, cz)) {
+                    for (&idx, &v) in edits {
+                        if v == TORCH {
+                            self.torches.push([
+                                cx * CHUNK_SIZE + (idx % size) as i32,
+                                (idx / (size * size)) as i32,
+                                cz * CHUNK_SIZE + (idx / size % size) as i32,
+                            ]);
+                        }
+                    }
+                }
+                if dx.abs() <= 3 && dz.abs() <= 3 {
+                    let Some(ch) = self.world.chunks.get(&ckey(cx, cz)) else { continue };
+                    for (idx, &b) in ch.data.iter().enumerate() {
+                        if is_plant(b) {
+                            let x = cx * CHUNK_SIZE + (idx % size) as i32;
+                            let z = cz * CHUNK_SIZE + (idx / size % size) as i32;
+                            let y = (idx / (size * size)) as i32;
+                            self.plants.push(([x, y, z], b));
+                        }
                     }
                 }
             }
@@ -880,7 +1034,9 @@ impl Game {
     }
 
     /// Bu karede çizilecek kutuları ve nokta ışıkları hazırlar.
-    fn build_effects(&mut self, cam: [f64; 3]) {
+    /// Görüş konisinin (`frustum`) dışında kalan meşale, araba, canlı ve
+    /// mermiler için kutu üretilmez.
+    fn build_effects(&mut self, cam: [f64; 3], frustum: &crate::mat4::Frustum) {
         if self.torches_dirty {
             self.refresh_torches();
         }
@@ -913,16 +1069,22 @@ impl Game {
                 break;
             }
             let flicker = ((self.time * 9.0 + (t[0] * 7 + t[2] * 13) as f32).sin() * 0.5 + 0.5) * 0.25;
-            boxes.push(BoxInst { center: [x, y + 0.28, z], half: [0.06, 0.28, 0.06], yaw: 0.0, pitch: 0.0, color: [128, 92, 52], glow: false });
-            let s = 0.085 + flicker * 0.05;
             // Alev hafifçe sağa sola eğilir.
-            let x = x + (self.time * 3.1 + t[0] as f32).sin() as f64 * 0.018;
-            boxes.push(BoxInst { center: [x, y + 0.62 + s as f64 * 0.3, z], half: [s, s, s], yaw: 0.7, pitch: 0.0, color: [255, 190, 70], glow: true });
-            boxes.push(BoxInst { center: [x, y + 0.62, z], half: [0.05, 0.07, 0.05], yaw: 0.0, pitch: 0.0, color: [255, 245, 190], glow: true });
+            let fx = x + (self.time * 3.1 + t[0] as f32).sin() as f64 * 0.018;
+            // Arkada kalan meşale de önümüzdeki zemini aydınlatabildiği için
+            // ışık listesine görüş konisi elemesinden önce eklenir.
             if lights.len() < 8 {
-                let r = rel([x, y + 0.7, z]);
+                let r = rel([fx, y + 0.7, z]);
                 lights.push([r[0], r[1], r[2], 12.5 + flicker]);
             }
+            let (rx, ry, rz) = ((x - cam[0]) as f32, (y - cam[1]) as f32, (z - cam[2]) as f32);
+            if !frustum.aabb_visible([rx - 0.2, ry, rz - 0.2], [rx + 0.2, ry + 0.8, rz + 0.2]) {
+                continue;
+            }
+            boxes.push(BoxInst { center: [x, y + 0.28, z], half: [0.06, 0.28, 0.06], yaw: 0.0, pitch: 0.0, color: [128, 92, 52], glow: false });
+            let s = 0.085 + flicker * 0.05;
+            boxes.push(BoxInst { center: [fx, y + 0.62 + s as f64 * 0.3, z], half: [s, s, s], yaw: 0.7, pitch: 0.0, color: [255, 190, 70], glow: true });
+            boxes.push(BoxInst { center: [fx, y + 0.62, z], half: [0.05, 0.07, 0.05], yaw: 0.0, pitch: 0.0, color: [255, 245, 190], glow: true });
         }
 
         // Arabalar: gövde, kabin, farlar ve dört teker.
@@ -931,6 +1093,10 @@ impl Game {
             let driven = self.driving == Some(i);
             let mut p = car.body.pos;
             if (p[0] - cam[0]).powi(2) + (p[2] - cam[2]).powi(2) > (PROP_DRAW_DIST * 2.0).powi(2) {
+                continue;
+            }
+            let (rx, ry, rz) = ((p[0] - cam[0]) as f32, (p[1] - cam[1]) as f32, (p[2] - cam[2]) as f32);
+            if !driven && !frustum.aabb_visible([rx - 1.3, ry - 0.1, rz - 1.3], [rx + 1.3, ry + 1.4, rz + 1.3]) {
                 continue;
             }
             let yaw = car.yaw as f32;
@@ -991,111 +1157,47 @@ impl Game {
             }
         }
 
-        // Hayvanlar ve yaratıklar: gövde, baş ve yürüyüşle sallanan bacaklar.
+        // Bitkiler ve ekinler: görüş konisi içindeki yakın örnekler rüzgârda sallanır.
+        for &(pos, id) in self.plants.iter() {
+            let (x, y, z) = (pos[0] as f64 + 0.5, pos[1] as f64, pos[2] as f64 + 0.5);
+            if (x - cam[0]).powi(2) + (z - cam[2]).powi(2) > PROP_DRAW_DIST * PROP_DRAW_DIST {
+                continue;
+            }
+            let (rx, ry, rz) = ((x - cam[0]) as f32, (y - cam[1]) as f32, (z - cam[2]) as f32);
+            if !frustum.aabb_visible([rx - 0.45, ry, rz - 0.45], [rx + 0.45, ry + 1.0, rz + 0.45]) {
+                continue;
+            }
+            Farming::push_plant_boxes(pos[0], pos[1], pos[2], id, self.time, &mut boxes);
+        }
+
+        // Hayvanlar ve yaratıklar: önce uzaklık ve görüş konisi ile elenir,
+        // yalnızca görünenlerin uzuv açıları ve kutuları hesaplanır.
         for m in self.mobs.list.iter() {
             let p = m.body.pos;
             if (p[0] - cam[0]).powi(2) + (p[2] - cam[2]).powi(2) > 72.0 * 72.0 {
                 continue;
             }
-            let yaw = m.yaw as f32;
-            let f = m.forward();
-            let right = [-f[1], f[0]];
-            let hurt = m.hurt as f32 * 0.6;
-            let tint = |c: [u8; 3]| {
-                let mix = |a: u8, b: f32| (a as f32 + (b - a as f32) * hurt) as u8;
-                [mix(c[0], 255.0), mix(c[1], 60.0), mix(c[2], 60.0)]
-            };
-            let running = m.state == State::Run;
-            let idle = m.state == State::Idle;
-            // Bacak salınımı kat edilen yolla ilerler: koşarken daha geniş ve hızlı.
-            let stride = if running { 0.95 } else { 0.5 } * (m.speed / 0.6).min(1.0) as f32;
-            let swing = (m.anim * if running { 4.2 } else { 6.0 }).sin() as f32 * stride;
-            // Boşta: nefes alıp verir, başını sağa sola çevirir.
-            let bob = if idle { (m.idle_time * 2.2).sin() * 0.012 } else { (m.anim * 8.0).sin().abs() * 0.03 };
-            let look = if idle { ((m.idle_time * 0.8).sin() * 0.6) as f32 } else { 0.0 };
-            let lean = if running { -0.14 } else { 0.0 };
-            // Yavrular aynı modelin küçültülmüş hâlidir.
-            let sc = m.scale();
-            let at = |r: f64, u: f64, fw: f64| {
-                let (r, u, fw) = (r * sc, u * sc, fw * sc);
-                [p[0] + right[0] * r + f[0] * fw, p[1] + u + bob, p[2] + right[1] * r + f[1] * fw]
-            };
-            let mut add = |center: [f64; 3], half: [f32; 3], yaw: f32, pitch: f32, color: [u8; 3]| {
-                let k = sc as f32;
-                boxes.push(BoxInst { center, half: [half[0] * k, half[1] * k, half[2] * k], yaw, pitch, color: tint(color), glow: false });
-            };
-            // Kalçadan (ya da omuzdan) sarkan uzuv: `angle` kadar öne/arkaya savrulur.
-            let limb = |r: f64, hip: f64, fw: f64, len: f64, w: f32, angle: f32| {
-                let a = angle as f64;
-                (at(r, hip - a.cos() * len * 0.5, fw + a.sin() * len * 0.5), [w, len as f32 * 0.5, w], angle)
-            };
-            match m.kind {
-                Kind::Sheep | Kind::Pig => {
-                    let sheep = m.kind == Kind::Sheep;
-                    let (body, head, legs) = if sheep { ([236, 236, 228], [84, 72, 66], [70, 60, 56]) } else { ([238, 164, 164], [228, 148, 150], [214, 134, 138]) };
-                    let (by, bh, leg) = if sheep { (0.74, 0.3, 0.46) } else { (0.54, 0.24, 0.32) };
-                    add(at(0.0, by, 0.0), [0.34, bh as f32, 0.52], yaw, lean, body);
-                    add(at(0.0, by + 0.16, 0.62), [0.2, 0.2, 0.19], yaw + look, lean, head);
-                    if !sheep {
-                        add(at(0.0, by + 0.1, 0.83), [0.1, 0.07, 0.04], yaw + look, 0.0, [200, 110, 120]);
-                    }
-                    for (r, fw, sign) in [(-0.2, 0.36, 1.0), (0.2, 0.36, -1.0), (-0.2, -0.36, -1.0), (0.2, -0.36, 1.0)] {
-                        let (c, h, a) = limb(r, leg, fw, leg, 0.085, swing * sign);
-                        add(c, h, yaw, a, legs);
-                    }
-                }
-                Kind::Chicken => {
-                    // Boştayken ara sıra yeri gagalar.
-                    let peck = if idle { ((m.idle_time * 3.0).sin().max(0.0) * 0.9) as f32 } else { 0.0 };
-                    add(at(0.0, 0.38, 0.0), [0.15, 0.15, 0.22], yaw, lean, [245, 245, 240]);
-                    add(at(0.0, 0.58 - peck as f64 * 0.16, 0.2 + peck as f64 * 0.06), [0.09, 0.11, 0.09], yaw + look, -peck, [245, 245, 240]);
-                    add(at(0.0, 0.56 - peck as f64 * 0.2, 0.32 + peck as f64 * 0.06), [0.04, 0.03, 0.05], yaw + look, -peck, [240, 190, 60]);
-                    add(at(0.0, 0.71 - peck as f64 * 0.14, 0.2), [0.03, 0.04, 0.06], yaw + look, -peck, [210, 50, 50]);
-                    for (r, sign) in [(-0.08, 1.0), (0.08, -1.0)] {
-                        let (c, h, a) = limb(r, 0.24, 0.0, 0.24, 0.03, swing * sign);
-                        add(c, h, yaw, a, [240, 190, 60]);
-                    }
-                }
-                Kind::Shroom => {
-                    // Sap gövde, kısa bacaklar ve beyaz benekli kırmızı şapka.
-                    let (stalk, cap, dot) = ([226, 214, 186], [200, 44, 40], [246, 246, 240]);
-                    // Şapka boştayken hafifçe sallanır, tükürmeden hemen önce geriye yatar.
-                    let wobble = if idle { ((m.idle_time * 1.7).sin() * 0.07) as f32 } else { 0.0 };
-                    for (r, sign) in [(-0.12, 1.0), (0.12, -1.0)] {
-                        let (c, h, a) = limb(r, 0.3, 0.0, 0.3, 0.08, swing * sign);
-                        add(c, h, yaw, a, [190, 176, 150]);
-                    }
-                    add(at(0.0, 0.66, 0.0), [0.2, 0.36, 0.18], yaw, lean, stalk);
-                    for r in [-0.09, 0.09] {
-                        add(at(r, 0.8, 0.185), [0.035, 0.05, 0.01], yaw, 0.0, [30, 30, 34]);
-                    }
-                    add(at(0.0, 1.1, 0.0), [0.44, 0.1, 0.44], yaw + look, wobble, cap);
-                    add(at(0.0, 1.24, 0.0), [0.3, 0.08, 0.3], yaw + look, wobble, cap);
-                    for (r, fw, u) in [(-0.24, 0.18, 1.21), (0.2, -0.22, 1.21), (0.26, 0.24, 1.21), (-0.08, -0.06, 1.33), (0.1, 0.12, 1.33)] {
-                        add(at(r, u, fw), [0.06, 0.012, 0.06], yaw + look, wobble, dot);
-                    }
-                }
-                Kind::Zombie => {
-                    let (skin, shirt, pants) = ([86, 150, 86], [50, 122, 142], [58, 60, 120]);
-                    add(at(0.0, 1.12, 0.0), [0.25, 0.37, 0.13], yaw, lean, shirt);
-                    add(at(0.0, 1.69, 0.0), [0.2, 0.2, 0.2], yaw + look, 0.0, skin);
-                    for (r, sign) in [(-0.13, 1.0), (0.13, -1.0)] {
-                        let (c, h, a) = limb(r, 0.75, 0.0, 0.75, 0.11, swing * sign);
-                        add(c, h, yaw, a, pants);
-                    }
-                    // Kovalarken kollar öne uzanır; gezinirken bacakların tersine sallanır.
-                    for (r, sign) in [(-0.36, -1.0), (0.36, 1.0)] {
-                        let angle = if running { 1.45 + (m.anim * 5.0).sin() as f32 * 0.1 * sign } else { swing * sign * 0.8 };
-                        let (c, h, a) = limb(r, 1.42, 0.0, 0.7, 0.09, angle);
-                        add(c, h, yaw, a, skin);
-                    }
-                }
+            let (min, max) = m.aabb(cam);
+            if !frustum.aabb_visible(min, max) {
+                continue;
             }
+            m.push_boxes(&mut boxes);
         }
 
-        // Zehir tükürükleri: parlayan yeşil damla.
+        // Zehir tükürükleri ve iskelet okları.
         for s in self.mobs.spits.iter() {
-            boxes.push(BoxInst { center: s.pos, half: [0.09, 0.09, 0.09], yaw: self.time * 6.0, pitch: self.time * 4.0, color: [130, 225, 70], glow: true });
+            let r = rel(s.pos);
+            if frustum.aabb_visible([r[0] - 0.25, r[1] - 0.25, r[2] - 0.25], [r[0] + 0.25, r[1] + 0.25, r[2] + 0.25]) {
+                if s.arrow {
+                    let v = s.vel;
+                    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+                    let yaw = (-v[0]).atan2(-v[2]) as f32;
+                    let pitch = (v[1] / len).asin() as f32;
+                    boxes.push(BoxInst { center: s.pos, half: [0.02, 0.02, 0.26], yaw, pitch, color: [164, 118, 66], glow: false });
+                } else {
+                    boxes.push(BoxInst { center: s.pos, half: [0.09, 0.09, 0.09], yaw: self.time * 6.0, pitch: self.time * 4.0, color: [130, 225, 70], glow: true });
+                }
+            }
         }
 
         // Elde silah: geri tepmeyle geri kayıp namlusu kalkar. Dürbünden
@@ -1561,7 +1663,17 @@ impl Game {
             self.player.pos[2],
         ];
 
-        self.build_effects(cam);
+        let yaw = self.player.yaw as f32;
+        let pitch = self.player.pitch as f32;
+        let fov_y = FOV_Y * (1.0 + 0.07 * self.fov_kick) * self.gun.fov_scale(self.held_weapon());
+        let far = reach + 64.0;
+        let view_proj = crate::mat4::mul(
+            &crate::mat4::perspective(fov_y, aspect, 0.05, far),
+            &crate::mat4::view_rotation(yaw, pitch),
+        );
+        let frustum = crate::mat4::Frustum::from_view_proj(&view_proj);
+
+        self.build_effects(cam, &frustum);
         let sky = sky_state(self.day_time);
         self.renderer.sky_top = sky.top;
         self.renderer.sky_horizon = sky.horizon;
@@ -1586,11 +1698,11 @@ impl Game {
 
         self.renderer.render(
             cam,
-            self.player.yaw as f32,
-            self.player.pitch as f32,
-            FOV_Y * (1.0 + 0.07 * self.fov_kick) * self.gun.fov_scale(self.held_weapon()),
+            yaw,
+            pitch,
+            fov_y,
             aspect,
-            reach + 64.0,
+            far,
             reach * 0.55,
             reach - 2.0,
             self.time,
@@ -1914,6 +2026,22 @@ extern "C" {
     /// `index.html` içinde tanımlı: fare kilidi isteğini dener, reddi yutar.
     #[wasm_bindgen(js_name = __requestLock)]
     fn request_lock(el: &web_sys::Element);
+
+    /// `index.html` içinde tanımlı: canlı listesini tarayıcıya (`localStorage`) yazar.
+    #[wasm_bindgen(js_name = __saveMobs)]
+    fn save_mobs_storage(bytes: &[u8]);
+
+    /// `index.html` içinde tanımlı: tarayıcıda kayıtlı canlı listesini okur.
+    #[wasm_bindgen(js_name = __loadMobs)]
+    fn load_mobs_storage() -> Vec<u8>;
+
+    /// `index.html` içinde tanımlı: tarım ekinlerini tarayıcıya (`localStorage`) yazar.
+    #[wasm_bindgen(js_name = __saveFarming)]
+    fn save_farming_storage(bytes: &[u8]);
+
+    /// `index.html` içinde tanımlı: tarayıcıda kayıtlı tarım ekinlerini okur.
+    #[wasm_bindgen(js_name = __loadFarming)]
+    fn load_farming_storage() -> Vec<u8>;
 }
 
 /// Fare kilidini güvenli biçimde ister (yakalanmamış Promise hatası üretmez).
@@ -2108,10 +2236,20 @@ pub fn debug_set_time(t: f64) {
 
 pub fn debug_spawn_mob(kind: u8) {
     with_game(|g| {
-        let kind = [Kind::Sheep, Kind::Pig, Kind::Chicken, Kind::Zombie, Kind::Shroom][kind as usize % 5];
+        let kind = [
+            Kind::Sheep,
+            Kind::Pig,
+            Kind::Chicken,
+            Kind::Zombie,
+            Kind::Shroom,
+            Kind::Cow,
+            Kind::Spider,
+            Kind::Skeleton,
+        ][kind as usize % 8];
         let (f, _) = g.player.basis();
         let p = g.player.pos;
         g.mobs.spawn(kind, [p[0] + f[0] * 4.0, p[1] + 1.2, p[2] + f[1] * 4.0]);
+        g.save_mobs();
     });
 }
 
@@ -2119,6 +2257,7 @@ pub fn debug_clear_mobs() {
     with_game(|g| {
         g.mobs.list.clear();
         g.mobs.spits.clear();
+        g.save_mobs();
     });
 }
 
@@ -2348,6 +2487,10 @@ pub fn start() -> Result<(), JsValue> {
         fov_kick: 0.0,
         mobs: Mobs::default(),
         mob_events: Vec::new(),
+        mob_save_timer: 5.0,
+        farming: Farming::default(),
+        farm_changed: Vec::new(),
+        plants: Vec::new(),
         gun: Gun::default(),
         aim_held: false,
         tracers: Vec::new(),
@@ -2381,6 +2524,19 @@ pub fn start() -> Result<(), JsValue> {
         moved_dist: 0.0,
         sprinting: false,
     };
+
+    let saved_mobs = load_mobs_storage();
+    if !saved_mobs.is_empty() {
+        let _ = game.mobs.load_bytes(&saved_mobs);
+        for m in game.mobs.list.iter_mut() {
+            let (x, z) = (m.body.pos[0].floor() as i32, m.body.pos[2].floor() as i32);
+            m.body.pos[1] = (game.world.height_at(x, z) + 1) as f64;
+        }
+    }
+    let saved_farming = load_farming_storage();
+    if !saved_farming.is_empty() {
+        let _ = game.farming.load_bytes(&saved_farming);
+    }
 
     game.rebuild_want(pcx, pcz);
     game.boot_total = game.want_data.len() + game.want_mesh.len();

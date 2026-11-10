@@ -21,6 +21,17 @@ pub const CRAFT_TABLE: u8 = 13;
 /// Meşale: chunk verisinde durur ama küp olarak çizilmez (küçük bir model
 /// olarak ayrıca çizilir), içinden geçilir ve çevresini aydınlatır.
 pub const TORCH: u8 = 14;
+/// Sürülmüş toprak: çapa ile çim/topraktan dönüştürülür, üzerine buğday ekilir.
+pub const FARMLAND: u8 = 15;
+/// Yabani bitkiler ve tarım ürünleri (içlerinden geçilir, 3B kutu modelleriyle çizilir).
+pub const TALL_GRASS: u8 = 16;
+pub const POPPY: u8 = 17;
+pub const DANDELION: u8 = 18;
+pub const SUGAR_CANE: u8 = 19;
+pub const WHEAT_0: u8 = 20;
+pub const WHEAT_1: u8 = 21;
+pub const WHEAT_2: u8 = 22;
+pub const WHEAT_3: u8 = 23;
 
 /// Yalnızca eşya olan kimlikler (blok değildir).
 pub const STICK: u16 = 100;
@@ -31,6 +42,13 @@ pub const CAR: u16 = 104;
 pub const PISTOL: u16 = 105;
 pub const SNIPER: u16 = 106;
 pub const MEAT: u16 = 107;
+pub const MUSHROOM: u16 = 108;
+pub const HOE: u16 = 109;
+pub const SEEDS: u16 = 110;
+pub const WHEAT: u16 = 111;
+pub const BREAD: u16 = 112;
+pub const BONE: u16 = 113;
+pub const SUGAR: u16 = 114;
 
 /// Doku atlasındaki döşeme indeksleri.
 pub const T_GRASS_TOP: u8 = 0;
@@ -87,7 +105,7 @@ const fn liquid_def(
     BlockDef { name, top, bottom, side, transparent: true, liquid: true, tint, vary: false }
 }
 
-const BLOCK_COUNT: usize = 15;
+const BLOCK_COUNT: usize = 24;
 
 static BLOCK_DEFS: [BlockDef; BLOCK_COUNT] = BLOCK_TABLE;
 
@@ -108,6 +126,15 @@ const BLOCK_TABLE: [BlockDef; BLOCK_COUNT] = [
     def("Ana Kaya", T_STONE, T_STONE, T_STONE, false, [0.42, 0.42, 0.45], false),
     def("Çalışma Tezgahı", T_CRAFT_TOP, T_PLANKS, T_CRAFT_SIDE, false, [1.0, 1.0, 1.0], false),
     def("Meşale", T_TORCH, T_TORCH, T_TORCH, true, [1.0, 1.0, 1.0], false),
+    def("Sürülmüş Toprak", T_DIRT, T_DIRT, T_DIRT, false, [0.55, 0.40, 0.28], false),
+    def("Ot", T_GRASS_TOP, T_GRASS_TOP, T_GRASS_TOP, true, [1.0, 1.0, 1.0], false),
+    def("Gelincik", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], false),
+    def("Karahindiba", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], false),
+    def("Şeker Kamışı", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], false),
+    def("Buğday Filizi", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], false),
+    def("Büyüyen Buğday", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], false),
+    def("Başaklı Buğday", T_LEAVES, T_LEAVES, T_LEAVES, true, [1.0, 1.0, 1.0], false),
+    def("Olgun Buğday", T_SAND, T_SAND, T_SAND, true, [1.0, 1.0, 1.0], false),
 ];
 
 /// Blok tanımını döndürür; geçersiz kimlikte `Hava` tanımı verilir.
@@ -140,16 +167,31 @@ pub fn is_opaque(id: u8) -> bool {
     OPAQUE[id as usize]
 }
 
-/// Su ve hava dışındaki her blok katıdır (oyuncu çarpışması için).
+/// Bitki ya da ekin bloğu mu? (İçinden geçilir, 3B kutu modeliyle çizilir.)
 #[inline]
-pub fn is_solid(id: u8) -> bool {
-    id != AIR && id != TORCH && !block_def(id).liquid
+pub fn is_plant(id: u8) -> bool {
+    matches!(
+        id,
+        TALL_GRASS | POPPY | DANDELION | SUGAR_CANE | WHEAT_0 | WHEAT_1 | WHEAT_2 | WHEAT_3
+    )
 }
 
-/// Chunk mesh'ine küp olarak giren blok mu? (Meşale ayrı bir modelle çizilir.)
+/// Sürülmüş toprakta büyüyen buğday ekini mi?
+#[inline]
+pub fn is_crop(id: u8) -> bool {
+    matches!(id, WHEAT_0 | WHEAT_1 | WHEAT_2 | WHEAT_3)
+}
+
+/// Su, hava, meşale ve bitkiler dışındaki her blok katıdır (oyuncu çarpışması için).
+#[inline]
+pub fn is_solid(id: u8) -> bool {
+    id != AIR && id != TORCH && !is_plant(id) && !block_def(id).liquid
+}
+
+/// Chunk mesh'ine küp olarak giren blok mu? (Meşale ve bitkiler ayrı modellerle çizilir.)
 #[inline]
 pub fn is_cube(id: u8) -> bool {
-    id != AIR && id != TORCH
+    id != AIR && id != TORCH && !is_plant(id)
 }
 
 #[inline]
@@ -170,6 +212,17 @@ pub enum Icon {
     Tabanca,
     Tufek,
     Et,
+    Mantar,
+    Capa,
+    Tohum,
+    Bugday,
+    Ekmek,
+    Kemik,
+    Seker,
+    Ot,
+    Gelincik,
+    Karahindiba,
+    SekerKamisi,
 }
 
 /// Eşya tanımı (bloklar ve yalnızca eşya olanlar için ortak).
@@ -187,7 +240,14 @@ pub struct ItemDef {
 pub fn item_def(id: u16) -> Option<ItemDef> {
     if (id as usize) < BLOCK_COUNT {
         let b = block_def(id as u8);
-        Some(ItemDef { name: b.name, icon: Icon::Tile(b.side), placeable: Some(id as u8), food: 0 })
+        let icon = match id as u8 {
+            TALL_GRASS => Icon::Ot,
+            POPPY => Icon::Gelincik,
+            DANDELION => Icon::Karahindiba,
+            SUGAR_CANE => Icon::SekerKamisi,
+            _ => Icon::Tile(b.side),
+        };
+        Some(ItemDef { name: b.name, icon, placeable: Some(id as u8), food: 0 })
     } else {
         match id {
             STICK => Some(ItemDef { name: "Çubuk", icon: Icon::Cubuk, placeable: None, food: 0 }),
@@ -196,8 +256,15 @@ pub fn item_def(id: u16) -> Option<ItemDef> {
             FISH => Some(ItemDef { name: "Balık", icon: Icon::Balik, placeable: None, food: 5 }),
             CAR => Some(ItemDef { name: "Araba", icon: Icon::Araba, placeable: None, food: 0 }),
             MEAT => Some(ItemDef { name: "Et", icon: Icon::Et, placeable: None, food: 8 }),
+            MUSHROOM => Some(ItemDef { name: "Mantar", icon: Icon::Mantar, placeable: None, food: 4 }),
             PISTOL => Some(ItemDef { name: "Tabanca", icon: Icon::Tabanca, placeable: None, food: 0 }),
             SNIPER => Some(ItemDef { name: "Dürbünlü Tüfek", icon: Icon::Tufek, placeable: None, food: 0 }),
+            HOE => Some(ItemDef { name: "Çapa", icon: Icon::Capa, placeable: None, food: 0 }),
+            SEEDS => Some(ItemDef { name: "Buğday Tohumu", icon: Icon::Tohum, placeable: None, food: 0 }),
+            WHEAT => Some(ItemDef { name: "Buğday", icon: Icon::Bugday, placeable: None, food: 0 }),
+            BREAD => Some(ItemDef { name: "Ekmek", icon: Icon::Ekmek, placeable: None, food: 6 }),
+            BONE => Some(ItemDef { name: "Kemik", icon: Icon::Kemik, placeable: None, food: 0 }),
+            SUGAR => Some(ItemDef { name: "Şeker", icon: Icon::Seker, placeable: None, food: 2 }),
             _ => None,
         }
     }
@@ -224,6 +291,15 @@ pub fn item_identifier(id: u16) -> Option<&'static str> {
         12 => "minecraft:bedrock",
         13 => "minecraft:crafting_table",
         14 => "minecraft:torch",
+        15 => "minecraft:farmland",
+        16 => "minecraft:short_grass",
+        17 => "minecraft:poppy",
+        18 => "minecraft:dandelion",
+        19 => "minecraft:sugar_cane",
+        20 => "voxelcraft:wheat_0",
+        21 => "voxelcraft:wheat_1",
+        22 => "voxelcraft:wheat_2",
+        23 => "voxelcraft:wheat_3",
         STICK => "minecraft:stick",
         APPLE => "minecraft:apple",
         FISHING_ROD => "minecraft:fishing_rod",
@@ -232,13 +308,20 @@ pub fn item_identifier(id: u16) -> Option<&'static str> {
         PISTOL => "voxelcraft:pistol",
         SNIPER => "voxelcraft:scoped_rifle",
         MEAT => "voxelcraft:meat",
+        MUSHROOM => "minecraft:red_mushroom",
+        HOE => "minecraft:wooden_hoe",
+        SEEDS => "minecraft:wheat_seeds",
+        WHEAT => "minecraft:wheat",
+        BREAD => "minecraft:bread",
+        BONE => "minecraft:bone",
+        SUGAR => "minecraft:sugar",
         _ => return None,
     })
 }
 
 /// [`item_identifier`]'ın tersi.
 pub fn item_from_identifier(name: &str) -> Option<u16> {
-    (0..=MEAT).find(|&id| item_identifier(id) == Some(name))
+    (0..=SUGAR).find(|&id| item_identifier(id) == Some(name))
 }
 
 /// Kullanıcıya gösterilen eşya adı.
@@ -324,7 +407,7 @@ mod tests {
     fn every_item_has_a_unique_valid_identifier() {
         let mut seen = std::collections::HashSet::new();
         let mut count = 0;
-        for id in 0..=MEAT {
+        for id in 0..=SUGAR {
             let Some(def) = item_def(id) else {
                 assert!(item_identifier(id).is_none(), "tanımsız eşya {id} için kimlik var");
                 continue;
@@ -335,8 +418,21 @@ mod tests {
             assert_eq!(item_from_identifier(name), Some(id));
             count += 1;
         }
-        assert_eq!(count, 23);
+        assert_eq!(count, 39);
         assert_eq!(item_from_identifier("minecraft:diamond"), None);
+    }
+
+    #[test]
+    fn plants_are_walk_through_non_cube_blocks_and_farmland_is_solid() {
+        assert!(is_solid(FARMLAND) && is_cube(FARMLAND) && is_opaque(FARMLAND));
+        for id in [TALL_GRASS, POPPY, DANDELION, SUGAR_CANE, WHEAT_0, WHEAT_1, WHEAT_2, WHEAT_3] {
+            assert!(is_plant(id));
+            assert!(!is_solid(id), "bitki {id} içinden geçilebilmeli");
+            assert!(!is_cube(id) && !is_opaque(id), "bitki {id} küp mesh'ine girmemeli");
+        }
+        assert!(is_crop(WHEAT_0) && is_crop(WHEAT_3) && !is_crop(POPPY));
+        assert_eq!(item_def(BREAD).unwrap().food, 6);
+        assert_eq!(item_def(SUGAR).unwrap().food, 2);
     }
 
     #[test]

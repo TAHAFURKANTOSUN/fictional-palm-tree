@@ -4,8 +4,8 @@
 //! konursa konsun, dolu hücrelerin sınırlayıcı kutusu desenle karşılaştırılır.
 
 use crate::blocks::{
-    CAR, COBBLE, CRAFT_TABLE, DIRT, FISHING_ROD, GLASS, GRASS, LEAVES, LOG, PISTOL, PLANKS, SAND,
-    SNIPER, STICK, STONE, TORCH,
+    BREAD, CAR, COBBLE, CRAFT_TABLE, DIRT, FISHING_ROD, GLASS, GRASS, HOE, LEAVES, LOG, PISTOL,
+    PLANKS, SAND, SEEDS, SNIPER, STICK, STONE, SUGAR, SUGAR_CANE, TORCH, WHEAT,
 };
 use crate::inventory::{Inventory, Stack, MAX_STACK};
 
@@ -24,7 +24,7 @@ pub struct Recipe {
     pub out: (u16, u8),
 }
 
-pub static RECIPES: [Recipe; 11] = [
+pub static RECIPES: [Recipe; 15] = [
     Recipe {
         id: "planks",
         kind: RecipeKind::Shapeless { inputs: &[LOG as u16] },
@@ -88,6 +88,32 @@ pub static RECIPES: [Recipe; 11] = [
             key: &[('C', COBBLE as u16), ('S', STICK), ('G', GLASS as u16)],
         },
         out: (SNIPER, 1),
+    },
+    Recipe {
+        id: "hoe",
+        kind: RecipeKind::Shaped {
+            pattern: &["PP", " S", " S"],
+            key: &[('P', PLANKS as u16), ('S', STICK)],
+        },
+        out: (HOE, 1),
+    },
+    Recipe {
+        id: "bread",
+        kind: RecipeKind::Shaped {
+            pattern: &["WWW"],
+            key: &[('W', WHEAT)],
+        },
+        out: (BREAD, 1),
+    },
+    Recipe {
+        id: "sugar",
+        kind: RecipeKind::Shapeless { inputs: &[SUGAR_CANE as u16] },
+        out: (SUGAR, 2),
+    },
+    Recipe {
+        id: "seeds",
+        kind: RecipeKind::Shapeless { inputs: &[WHEAT] },
+        out: (SEEDS, 2),
     },
 ];
 
@@ -626,5 +652,29 @@ mod tests {
     fn recipe_needs_counts_multiples() {
         let needs = recipe_needs(&RECIPES[2]); // 2x2 tahta
         assert_eq!(needs, vec![(PLANKS as u16, 4)]);
+    }
+
+    #[test]
+    fn farming_recipes_craft_hoe_bread_sugar_and_seeds() {
+        let mut g = empty();
+        put(&mut g, 0, PLANKS as u16);
+        put(&mut g, 1, PLANKS as u16);
+        put(&mut g, 4, STICK);
+        put(&mut g, 7, STICK);
+        assert_eq!(craft_output(&g), Some((HOE, 1)));
+
+        let mut g = empty();
+        for i in [3, 4, 5] {
+            put(&mut g, i, WHEAT);
+        }
+        assert_eq!(craft_output(&g), Some((BREAD, 1)));
+
+        let mut g = empty();
+        put(&mut g, 4, SUGAR_CANE as u16);
+        assert_eq!(craft_output(&g), Some((SUGAR, 2)));
+
+        let mut g = empty();
+        put(&mut g, 2, WHEAT);
+        assert_eq!(craft_output(&g), Some((SEEDS, 2)));
     }
 }

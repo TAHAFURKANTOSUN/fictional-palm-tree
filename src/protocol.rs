@@ -122,6 +122,10 @@ impl Writer {
     pub fn position(&mut self, p: Position) {
         self.i64(p.pack());
     }
+
+    pub fn angle(&mut self, a: Angle) {
+        self.u8(a.0);
+    }
 }
 
 /// Bir `VarInt`'in kaç bayt tuttuğu.
@@ -236,9 +240,72 @@ impl<'a> Reader<'a> {
     pub fn position(&mut self) -> Result<Position> {
         Ok(Position::unpack(self.i64()?))
     }
+
+    pub fn angle(&mut self) -> Result<Angle> {
+        Ok(Angle(self.u8()?))
+    }
 }
 
-// --- Position ve Identifier -------------------------------------------------
+// --- Position, Angle, Face ve Identifier ------------------------------------
+
+/// Dönüş açısı (`Angle`): tam turun (`2π` radyan / `360°`) 1/256'sı olan tek
+/// baytlık (`u8`) protokol veri tipi (`Spawn Entity` vb. paketlerde kullanılır).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Angle(pub u8);
+
+impl Angle {
+    pub fn from_radians(rad: f64) -> Self {
+        let turns = rad.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU;
+        Self(((turns * 256.0).round() as i32 & 0xFF) as u8)
+    }
+
+    pub fn to_radians(self) -> f64 {
+        (self.0 as f64 / 256.0) * std::f64::consts::TAU
+    }
+}
+
+/// Blok yüzü (`Use Item On` paketindeki `Face` alanı: `0..=5`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Face {
+    /// `-Y`
+    Bottom = 0,
+    /// `+Y`
+    Top = 1,
+    /// `-Z`
+    North = 2,
+    /// `+Z`
+    South = 3,
+    /// `-X`
+    West = 4,
+    /// `+X`
+    East = 5,
+}
+
+impl Face {
+    pub fn from_i32(v: i32) -> Option<Self> {
+        Some(match v {
+            0 => Face::Bottom,
+            1 => Face::Top,
+            2 => Face::North,
+            3 => Face::South,
+            4 => Face::West,
+            5 => Face::East,
+            _ => return None,
+        })
+    }
+
+    pub fn from_normal(nx: i32, ny: i32, nz: i32) -> Option<Self> {
+        Some(match (nx, ny, nz) {
+            (0, -1, 0) => Face::Bottom,
+            (0, 1, 0) => Face::Top,
+            (0, 0, -1) => Face::North,
+            (0, 0, 1) => Face::South,
+            (-1, 0, 0) => Face::West,
+            (1, 0, 0) => Face::East,
+            _ => return None,
+        })
+    }
+}
 
 /// Blok konumu. Ağda tek bir 64 bit sayıya paketlenir: `x` 26 bit, `z` 26 bit,
 /// `y` 12 bit (hepsi işaretli).
@@ -407,10 +474,16 @@ pub enum Packet {
     FinishConfiguration,
     AcknowledgeFinishConfiguration,
     // Play (bu oyuna özel)
-    /// Bir blok değişti; `block` oyunun blok kimliğidir.
+    /// Bir blok değişti (`Block Update`); `block` oyunun blok kimliğidir.
     BlockUpdate { pos: Position, block: i32 },
-    /// Oyuncunun konumu ve bakışı.
+    /// Oyuncunun konumu ve bakışı (`Set Player Position and Rotation`).
     PlayerPosition { x: f64, y: f64, z: f64, yaw: f32, pitch: f32, on_ground: bool },
+    /// Yeni bir varlık / yaratık doğdu (`Spawn Entity`): `kind` varlık kimliği
+    /// (`minecraft:cow`, `minecraft:spider` vb.), `pitch` ve `yaw` `Angle` (`1/256` tur) tipindedir.
+    SpawnEntity { entity_id: i32, kind: String, x: f64, y: f64, z: f64, pitch: Angle, yaw: Angle },
+    /// Bir bloğun yüzüne eşya kullanıldı (`Use Item On` — çapalama, tohum ekme,
+    /// kemik tozu / gübreleme, blok yerleştirme).
+    UseItemOn { pos: Position, face: Face, item_id: i32 },
 }
 
 impl Packet {
@@ -430,7 +503,9 @@ impl Packet {
             Packet::AcknowledgeFinishConfiguration => (Configuration, Serverbound, 0x00),
             Packet::FinishConfiguration => (Configuration, Clientbound, 0x00),
             Packet::PlayerPosition { .. } => (Play, Serverbound, 0x00),
+            Packet::UseItemOn { .. } => (Play, Serverbound, 0x01),
             Packet::BlockUpdate { .. } => (Play, Clientbound, 0x00),
+            Packet::SpawnEntity { .. } => (Play, Clientbound, 0x01),
         }
     }
 
@@ -474,6 +549,24 @@ impl Packet {
                 w.f32(*pitch);
                 w.bool(*on_ground);
             }
+            Packet::SpawnEntity { entity_id, kind, x, y, z, pitch, yaw } => {
+                Identifier::parse(kind)?;
+                w.var_int(*entity_id);
+                w.string(kind);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+                w.angle(*pitch);
+                w.angle(*yaw);
+            }
+            Packet::UseItemOn { pos, face, item_id } => {
+                if !pos.in_range() {
+                    return Err(Error::InvalidValue);
+                }
+                w.position(*pos);
+                w.var_int(*face as i32);
+                w.var_int(*item_id);
+            }
         }
         frame(self.route().2, &w.buf, threshold)
     }
@@ -513,7 +606,27 @@ impl Packet {
                 pitch: r.f32()?,
                 on_ground: r.bool()?,
             },
+            (Play, Serverbound, 0x01) => {
+                let pos = r.position()?;
+                let face = Face::from_i32(r.var_int()?).ok_or(Error::InvalidValue)?;
+                let item_id = r.var_int()?;
+                Packet::UseItemOn { pos, face, item_id }
+            }
             (Play, Clientbound, 0x00) => Packet::BlockUpdate { pos: r.position()?, block: r.var_int()? },
+            (Play, Clientbound, 0x01) => {
+                let entity_id = r.var_int()?;
+                let kind = r.string(255)?.to_string();
+                Identifier::parse(&kind)?;
+                Packet::SpawnEntity {
+                    entity_id,
+                    kind,
+                    x: r.f64()?,
+                    y: r.f64()?,
+                    z: r.f64()?,
+                    pitch: r.angle()?,
+                    yaw: r.angle()?,
+                }
+            }
             _ => return Err(Error::UnknownPacket(id)),
         };
         r.finish()?;
@@ -753,6 +866,20 @@ mod tests {
             Packet::AcknowledgeFinishConfiguration,
             Packet::BlockUpdate { pos: Position { x: -17, y: 40, z: 123_456 }, block: 9 },
             Packet::PlayerPosition { x: 1e6 + 0.5, y: 29.02, z: -1e6 - 0.5, yaw: 1.5, pitch: -0.25, on_ground: true },
+            Packet::SpawnEntity {
+                entity_id: 42,
+                kind: "minecraft:cow".into(),
+                x: 12.5,
+                y: 28.0,
+                z: -44.5,
+                pitch: Angle(0),
+                yaw: Angle::from_radians(std::f64::consts::FRAC_PI_2),
+            },
+            Packet::UseItemOn {
+                pos: Position { x: 10, y: 27, z: -8 },
+                face: Face::Top,
+                item_id: 110,
+            },
         ];
         for p in packets {
             let (state, dir, id) = p.route();
@@ -822,5 +949,22 @@ mod tests {
         let far = Packet::BlockUpdate { pos: Position { x: 1 << 25, y: 0, z: 0 }, block: 1 };
         assert_eq!(far.encode(None), Err(Error::InvalidValue), "paketlenemeyen konum sessizce sarmamalı");
         assert_eq!(frame(0, &vec![0; MAX_PACKET_LEN], None), Err(Error::TooLong));
+    }
+
+    #[test]
+    fn angle_and_face_follow_the_protocol_specification() {
+        assert_eq!(Angle::from_radians(0.0), Angle(0));
+        assert_eq!(Angle::from_radians(std::f64::consts::FRAC_PI_2), Angle(64));
+        assert_eq!(Angle::from_radians(std::f64::consts::PI), Angle(128));
+        assert_eq!(Angle::from_radians(-std::f64::consts::FRAC_PI_2), Angle(192));
+        assert!((Angle(64).to_radians() - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+
+        assert_eq!(Face::from_normal(0, -1, 0), Some(Face::Bottom));
+        assert_eq!(Face::from_normal(0, 1, 0), Some(Face::Top));
+        assert_eq!(Face::from_normal(0, 0, -1), Some(Face::North));
+        assert_eq!(Face::from_normal(0, 0, 1), Some(Face::South));
+        assert_eq!(Face::from_normal(-1, 0, 0), Some(Face::West));
+        assert_eq!(Face::from_normal(1, 0, 0), Some(Face::East));
+        assert_eq!(Face::from_i32(6), None);
     }
 }
