@@ -269,6 +269,13 @@ struct Game {
     fps: u32,
     debug: DebugInfo,
     debug_timer: f64,
+    /// Kare başına aşama süreleri (ms): chunk akışı, simülasyon, çizim,
+    /// arayüz, toplam. `debug_state` ile dışarıya verilir; profiler kapalıyken
+    /// de yalnızca birkaç `performance.now()` çağrısı kadardır.
+    prof_acc: [f64; 5],
+    prof_frames: u32,
+    /// Son ~0,5 sn'nin ortalama aşama süreleri (ms).
+    prof: [f64; 5],
     time: f32,
     started: bool,
 
@@ -1906,8 +1913,10 @@ impl Game {
         if self.started {
             self.day_time = (self.day_time + dt / DAY_LENGTH).rem_euclid(1.0);
         }
+        let t_start = self.now_ms();
         self.poll_network(dt);
         self.update_chunks();
+        let t_chunks = self.now_ms();
         self.update_player(dt);
         self.update_parked_cars(dt);
         self.update_fishing(dt);
@@ -1918,8 +1927,27 @@ impl Game {
         self.particles.update(dt, &self.world);
         self.update_survival(dt);
         self.drain_events();
+        let t_sim = self.now_ms();
         self.hud.tick(dt);
         self.present();
+        self.prof_frame(t_start, t_chunks, t_sim, self.now_ms());
+    }
+
+    /// Aşama sürelerini biriktirir ve ~0,5 sn'de bir ortalamasını yayınlar.
+    /// `present` çizim/arayüz sürelerini kendisi ekler (2 ve 3).
+    fn prof_frame(&mut self, start: f64, chunks: f64, sim: f64, end: f64) {
+        self.prof_acc[0] += chunks - start;
+        self.prof_acc[1] += sim - chunks;
+        self.prof_acc[4] += end - start;
+        self.prof_frames += 1;
+        if self.prof_frames >= 30 {
+            let n = self.prof_frames as f64;
+            for i in 0..5 {
+                self.prof[i] = self.prof_acc[i] / n;
+                self.prof_acc[i] = 0.0;
+            }
+            self.prof_frames = 0;
+        }
     }
 
     /// Kare hızı düşükse 3B tuvalin çözünürlüğünü kademeli olarak ayarlar
@@ -2169,6 +2197,7 @@ impl Game {
             None
         };
 
+        let t_draw = self.now_ms();
         self.renderer.render(
             cam,
             yaw,
@@ -2187,6 +2216,7 @@ impl Game {
                 particles: &self.particles.list,
             },
         );
+        let t_render = self.now_ms();
 
         // Uzak oyuncuların ekran üzerindeki isim etiketlerini (nametag) hesapla
         self.nametags.clear();
@@ -2227,6 +2257,13 @@ impl Game {
             chat_seq: self.chat_seq,
             nametags: &self.nametags,
         });
+
+        // Aşama süreleri: çizim (2) ve arayüz (3). Önyükleme sırasında
+        // ölçüm yapılmaz; oradaki kareler temsili değildir.
+        if !self.booting {
+            self.prof_acc[2] += t_render - t_draw;
+            self.prof_acc[3] += self.now_ms() - t_render;
+        }
     }
 
     // ---------------------------------------------------------------
@@ -2657,6 +2694,7 @@ pub fn debug_state_json() -> String {
                 "\"mining\":{:.2},\"particles\":{},\"renderScale\":{:.2},",
                 "\"poison\":{:.1},\"spits\":{},\"zoom\":{:.2},\"shots\":{},\"tracers\":{},\"mobs\":[{}],",
                 "\"torches\":{},\"lights\":{},\"cars\":{},\"driving\":{},\"fishing\":\"{}\",",
+                "\"prof\":[{:.2},{:.2},{:.2},{:.2},{:.2}],",
                 "\"slots\":[{}]",
                 "}}"
             ),
@@ -2725,6 +2763,11 @@ pub fn debug_state_json() -> String {
                 Some(Phase::Waiting(_)) => "waiting",
                 Some(Phase::Biting(_)) => "biting",
             },
+            g.prof[0],
+            g.prof[1],
+            g.prof[2],
+            g.prof[3],
+            g.prof[4],
             slots.join(",")
         )
     })
@@ -3089,6 +3132,9 @@ pub fn start() -> Result<(), JsValue> {
         debug: DebugInfo::default(),
         // İlk karede hemen örneklensin.
         debug_timer: DEBUG_SAMPLE_INTERVAL,
+        prof_acc: [0.0; 5],
+        prof_frames: 0,
+        prof: [0.0; 5],
         time: 0.0,
         started: false,
         moved_dist: 0.0,

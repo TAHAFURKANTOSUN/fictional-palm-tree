@@ -43,17 +43,29 @@ layout(location = 1) in vec3 a_col;
 uniform mat4 u_viewProj;
 uniform vec3 u_origin;
 uniform vec2 u_camMod;
+uniform float u_water;
+uniform float u_time;
 out vec2 v_uv;
 out vec3 v_col;
 out float v_dist;
-out highp vec2 v_wpos;
 out highp vec3 v_rel;
+out float v_ripple;
 void main() {
   vec3 p = a_pos.xyz + u_origin;
   v_rel = p;
   gl_Position = u_viewProj * vec4(p, 1.0);
   // Dünya konumu (64 blokta bir saran): su parıltısı kamerayla kaymasın.
-  v_wpos = p.xz + u_camMod;
+  highp vec2 wpos = p.xz + u_camMod;
+  // Su dalgası **köşe başına** hesaplanır: piksel başına üç sin() yerine
+  // dörtgenin dört köşesinde bir kez. Dalga zaten 1/8 blok ızgarasına
+  // nicemlendiği için interpolasyon görünümü değiştirmez.
+  if (u_water > 0.5) {
+    highp vec2 w = floor(wpos * 8.0) / 8.0 * 0.0981748;
+    v_ripple = sin(w.x * 11.0 + u_time * 1.4) * sin(w.y * 7.0 - u_time * 1.1)
+             + 0.6 * sin((w.x + w.y) * 17.0 + u_time * 2.0);
+  } else {
+    v_ripple = 0.0;
+  }
   float corner = floor(a_pos.w / 16.0);
   float tile = a_pos.w - corner * 16.0;
   float cu = (corner == 1.0 || corner == 2.0) ? 1.0 : 0.0;
@@ -69,13 +81,15 @@ precision mediump float;
 in vec2 v_uv;
 in vec3 v_col;
 in float v_dist;
-in highp vec2 v_wpos;
+in float v_ripple;
 in highp vec3 v_rel;
 uniform sampler2D u_atlas;
 uniform highp vec4 u_lights[8];
 uniform int u_lightCount;
-uniform float u_water;
-uniform float u_time;
+// Bu ikisi düğüm gölgelendiricisiyle **aynı** hassasiyette olmalı: program
+// bağlanırken hassasiyet farkı hata verir (ES 3.0).
+uniform highp float u_water;
+uniform highp float u_time;
 uniform float u_light;
 uniform vec3 u_fogColor;
 uniform float u_fogNear;
@@ -88,11 +102,9 @@ void main() {
   if (t.a < u_alphaTest) discard;
   vec3 c = t.rgb * v_col;
   if (u_water > 0.5) {
-    // Dalga boyları 64'ün tam bölenleri: sarma noktasında dikiş oluşmaz.
-    highp vec2 w = floor(v_wpos * 8.0) / 8.0 * 0.0981748;
-    float ripple = sin(w.x * 11.0 + u_time * 1.4) * sin(w.y * 7.0 - u_time * 1.1)
-                 + 0.6 * sin((w.x + w.y) * 17.0 + u_time * 2.0);
-    c *= 1.0 + 0.07 * ripple;
+    // Dalga köşe başına hesaplanıp buraya interpolasyonla gelir (bkz. düğüm
+    // gölgelendiricisi): piksel başına sin() çağrısı yok.
+    c *= 1.0 + 0.07 * v_ripple;
   }
   // Meşaleler: en yakın birkaç nokta ışık. Gündüz etkisizdir (ortam ışığı
   // zaten tam), gece çevresini sıcak bir renkle aydınlatır.

@@ -96,7 +96,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 | [`wasm-bindgen-cli`](https://github.com/rustwasm/wasm-bindgen) | **0.2.129** | `Cargo.lock` içindeki kütüphane sürümüyle **birebir** eşleşmeli |
 | Bash | — | `build.sh` için (Windows'ta Git Bash / WSL; macOS ve Linux'ta hazır) |
 | Node.js | isteğe bağlı | Tek dosya paketleyici ve başsız test için |
-| [`wasm-opt`](https://github.com/WebAssembly/binaryen) | isteğe bağlı | PATH'te varsa `build.sh` çıktıyı ≈%30 küçültür |
+| [`wasm-opt`](https://github.com/WebAssembly/binaryen) | isteğe bağlı | PATH'te varsa (ya da `npm install --no-save binaryen`) `build.sh` çıktıyı ≈%22 küçültür |
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -287,6 +287,21 @@ flowchart LR
 - **Arayüz** — Canvas2D arayüzü her karede değil, yalnızca gösterdiği durum
   değiştiğinde yeniden çizilir (tam çizim ≈2000 Canvas2D çağrısıdır).
 
+- **Su dalgası köşe başına** — dalga artık piksel başına üç `sin()` yerine
+  dörtgenin köşelerinde hesaplanıp interpolasyonla taşınır (dalga zaten 1/8 blok
+  ızgarasına nicemleniyordu; görünüm değişmez). Okyanusa bakan sahnelerde
+  fragment gölgelendiricisi belirgin biçimde hafifler.
+- **Küçültülmüş wasm** — `build.sh`, wasm-bindgen çıktısını `wasm-opt -O3
+  --strip-debug` ile küçültür (PATH'te yoksa `node_modules/.bin/wasm-opt`
+  aranır: `npm install --no-save binaryen`). Ölçülen kazanç: **533 KB → 414 KB
+  (%22)**, gzip 178 KB → 156 KB, tek dosyalık sürüm 780 KB → 621 KB.
+- **Kare başına ayırma yok** — arayüzün "değişti mi?" anahtarı isim etiketlerini
+  `Vec<String>` olarak kopyalamaz; tek bir `u64` parmak izi karşılaştırılır.
+- **Aşama ölçümü** — `debug_state()` içindeki `prof` alanı
+  `[chunk akışı, simülasyon, çizim, arayüz, toplam]` sürelerini milisaniye
+  olarak verir (son ~30 karenin ortalaması). Ölçüm: tipik sahnede toplam CPU
+  ≈0,3 ms/kare — yani darboğaz CPU değil, GPU. Yerel ölçüm için:
+  `cargo run --release --example bench` (chunk üretimi ≈0,05 ms, mesh ≈0,03 ms).
 - **Kare hızı koruması** — chunk akışı kare başına 2,5 ms ile sınırlıdır
   (kare geç kalıyorsa 1 ms), boşaltmalar karelere yayılır. FPS yine de 50'nin
   altında kalırsa 3B tuvalin çözünürlüğü kademeli düşürülür (%85 → %70 → %55);

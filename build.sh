@@ -5,8 +5,10 @@
 #   rustup target add wasm32-unknown-unknown
 #   cargo install wasm-bindgen-cli --version 0.2.129
 #
-# İsteğe bağlı: PATH'te `wasm-opt` (binaryen) varsa çıktı ayrıca küçültülür
-# (~%30 daha küçük .wasm). Yoksa bu adım sessizce atlanır.
+# İsteğe bağlı: `wasm-opt` (binaryen) varsa çıktı ayrıca küçültülür (~%20 daha
+# küçük .wasm → daha hızlı indirme ve derleme). PATH'te yoksa `node_modules`
+# altındaki yerel kopya aranır (`npm install --no-save binaryen`). İkisi de
+# yoksa bu adım sessizce atlanır.
 #
 # Kullanım:
 #   ./build.sh            # wasm'ı derler ve pkg/ üretir
@@ -39,18 +41,29 @@ mkdir -p pkg-nomodules
 # bindgen'in ihtiyaç duyduğu özel bölümleri taşır). Başarısız olursa — örneğin
 # eski bir binaryen sürümü yeni wasm özelliklerini tanımazsa — derleme
 # bozulmaz, küçültülmemiş dosya kullanılır.
+WASM_OPT=""
 if command -v wasm-opt >/dev/null 2>&1; then
-  echo "==> wasm-opt ile küçültülüyor"
+  WASM_OPT="wasm-opt"
+elif [ -x "node_modules/.bin/wasm-opt" ]; then
+  WASM_OPT="node_modules/.bin/wasm-opt"
+fi
+
+if [ -n "$WASM_OPT" ]; then
+  echo "==> wasm-opt ile küçültülüyor ($WASM_OPT)"
   for wasm in "$OUT_DIR/voxelcraft_rs_bg.wasm" pkg-nomodules/voxelcraft_rs_bg.wasm; do
-    if wasm-opt -O3 "$wasm" -o "$wasm.opt" 2>/dev/null; then
+    before=$(wc -c <"$wasm")
+    if "$WASM_OPT" -O3 --strip-debug --strip-producers "$wasm" -o "$wasm.opt" 2>/dev/null; then
       mv "$wasm.opt" "$wasm"
+      after=$(wc -c <"$wasm")
+      echo "    $(basename "$wasm"): $((before / 1024)) KB → $((after / 1024)) KB"
     else
       rm -f "$wasm.opt"
       echo "    (wasm-opt başarısız oldu, $wasm küçültülmeden bırakıldı)"
     fi
   done
 else
-  echo "==> wasm-opt bulunamadı, küçültme atlandı (isteğe bağlı)"
+  echo "==> wasm-opt bulunamadı, küçültme atlandı"
+  echo "    (isteğe bağlı: npm install --no-save binaryen)"
 fi
 
 echo "==> Tek dosyalık sürüm paketleniyor (voxelcraft-rs.html)"

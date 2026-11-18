@@ -124,7 +124,24 @@ struct HudKey {
     debug: DebugInfo,
     net_label_len: usize,
     chat_seq: u32,
-    nametags: Vec<(String, i32, i32)>,
+    /// İsim etiketlerinin içeriğinin kısa parmak izi. `Vec<String>` kopyalamak
+    /// kare başına ayırma yapıyordu; karma yalnızca tamsayı karşılaştırmasıdır.
+    nametag_hash: u64,
+}
+
+/// İsim etiketlerinin (ad + ekran konumu) ucuz parmak izi — FNV-1a.
+/// Kare başına `String` klonlamak yerine tek bir tamsayı karşılaştırılır.
+fn nametag_hash(tags: &[(String, i32, i32)]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (name, x, y) in tags {
+        for b in name.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h ^= ((*x as u32 as u64) << 32) | (*y as u32 as u64);
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
 }
 
 pub struct Hud {
@@ -252,7 +269,7 @@ impl Hud {
             debug: if show_debug { f.debug } else { DebugInfo::default() },
             net_label_len: f.net_label.len(),
             chat_seq: f.chat_seq,
-            nametags: f.nametags.to_vec(),
+            nametag_hash: nametag_hash(f.nametags),
         }
     }
 
