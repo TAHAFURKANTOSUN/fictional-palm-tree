@@ -23,7 +23,7 @@ echo "==> Motor testleri (saf Rust çekirdeği)"
 cargo test --lib --quiet
 
 echo "==> $WASM_TARGET için derleniyor"
-cargo build --release --target "$WASM_TARGET"
+cargo build --lib --release --target "$WASM_TARGET"
 
 echo "==> JS bağlayıcısı üretiliyor ($OUT_DIR)"
 mkdir -p "$OUT_DIR"
@@ -64,36 +64,6 @@ echo "==> Hazır: $OUT_DIR/voxelcraft_rs_bg.wasm ($(du -h "$OUT_DIR/voxelcraft_r
 
 if [ "${1:-}" = "serve" ]; then
   PORT="${2:-8080}"
-  # Windows'ta `WindowsApps/python3` sahte kısayolu bulunabileceği için
-  # gerçekten çalışan Python yorumlayıcısı seçilir; yoksa Node ile sunulur.
-  PYTHON=""
-  for cand in python python3 py; do
-    if command -v "$cand" >/dev/null 2>&1 && "$cand" --version >/dev/null 2>&1; then
-      PYTHON="$cand"
-      break
-    fi
-  done
-  if [ -n "$PYTHON" ]; then
-    echo "==> http://localhost:$PORT üzerinde sunuluyor (Ctrl+C ile durdurun)"
-    "$PYTHON" -m http.server "$PORT"
-  elif command -v node >/dev/null 2>&1; then
-    echo "==> http://localhost:$PORT üzerinde (node ile) sunuluyor (Ctrl+C ile durdurun)"
-    node -e "
-      const http = require('http'), fs = require('fs'), path = require('path');
-      const mime = {'.html':'text/html;charset=utf-8','.js':'text/javascript;charset=utf-8','.wasm':'application/wasm','.css':'text/css','.json':'application/json'};
-      http.createServer((req, res) => {
-        let u = decodeURIComponent(req.url.split('?')[0]);
-        if (u === '/') u = '/index.html';
-        const fp = path.join(process.cwd(), u);
-        fs.readFile(fp, (err, data) => {
-          if (err) { res.writeHead(404); res.end('Not found'); return; }
-          res.writeHead(200, {'Content-Type': mime[path.extname(fp)] || 'application/octet-stream'});
-          res.end(data);
-        });
-      }).listen($PORT);
-    "
-  else
-    echo "Python veya Node bulunamadı; dizini herhangi bir HTTP sunucusuyla sunun." >&2
-    exit 1
-  fi
+  echo "==> Çok oyunculu sunucu + HTTP web sunucusu başlatılıyor (port $PORT, Ctrl+C ile durdurun)"
+  cargo run --release --bin server -- "$PORT"
 fi

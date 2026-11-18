@@ -68,12 +68,44 @@
   #loadingText { font-size: 14px; opacity: .85; margin-bottom: 12px; }
   #err { color: #ff8a8a; font-size: 13px; line-height: 1.6; margin-top: 10px; }
   .hide { display: none !important; }
+  .mp-box {
+    margin: 0 0 18px 0; padding: 12px 14px; border-radius: 12px;
+    background: rgba(10,14,22,.76); border: 1px solid rgba(124,226,255,.22);
+    text-align: left; font-size: 12.5px;
+  }
+  .mp-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .mp-row input {
+    flex: 1; padding: 7px 10px; border-radius: 7px; border: 1px solid rgba(255,255,255,.18);
+    background: rgba(255,255,255,.07); color: #fff; font-size: 12.5px; outline: none;
+  }
+  .mp-row input:focus { border-color: #7ce2ff; }
+  .mp-btn {
+    padding: 7px 12px; border-radius: 7px; border: 1px solid rgba(124,226,255,.35);
+    background: rgba(56,168,212,.22); color: #dff6ff; font-weight: 600; font-size: 12px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .mp-btn:hover { background: rgba(56,168,212,.38); }
+  #slpStatus { font-size: 12px; color: #a8e07a; opacity: .92; }
+  #chatBar {
+    position: fixed; left: 14px; bottom: 92px; z-index: 45;
+    width: min(440px, 88vw); display: flex; gap: 6px;
+    padding: 7px 10px; border-radius: 9px;
+    background: rgba(10,12,18,.86); border: 1px solid rgba(124,226,255,.4);
+  }
+  #chatInput {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: #fff; font-size: 13px;
+  }
 </style>
 </head>
 <body>
 
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
+
+<div id="chatBar" class="hide">
+  <input id="chatInput" type="text" maxlength="200" placeholder="Mesaj yaz ve Enter'a bas (ESC iptal)…" autocomplete="off" />
+</div>
 
 <div id="loading">
   <div class="panel">
@@ -103,7 +135,17 @@
       <div><b>[ ve ]</b><span>Görüş mesafesi</span></div>
       <div><b>H</b><span>Arayüzü gizle</span></div>
       <div><b>R</b><span>Arabaya bin / in</span></div>
+      <div><b>T</b><span>Sohbet (Çok Oyunculu)</span></div>
       <div><b>ESC</b><span>Fareyi bırak</span></div>
+    </div>
+    <div class="mp-box" id="mpBox">
+      <div class="mp-row">
+        <input id="playerName" type="text" maxlength="16" placeholder="Oyuncu Adı (ör. Taha)" />
+        <input id="serverUrl" type="text" placeholder="ws://localhost:8080" />
+        <button class="mp-btn" id="pingBtn" type="button">SLP Sorgula</button>
+        <button class="mp-btn" id="connectBtn" type="button">Sunucuya Bağlan</button>
+      </div>
+      <div id="slpStatus">Sunucu Durumu: Sorgulanıyor…</div>
     </div>
     <button id="startBtn">Oyna</button>
   </div>
@@ -141,6 +183,7 @@
       g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       o.connect(g); g.connect(c.destination);
+      o.onended = function () { try { g.disconnect(); } catch (e) {} };
       o.start(t); o.stop(t + dur + 0.03);
     }
     // Süzgeçten geçirilmiş gürültü (tıslama, patlama).
@@ -154,7 +197,8 @@
       g.gain.setValueAtTime(vol, t);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       s.connect(f); f.connect(g); g.connect(c.destination);
-      s.start(t);
+      s.onended = function () { try { g.disconnect(); f.disconnect(); } catch (e) {} };
+      s.start(t); s.stop(t + dur + 0.03);
     }
     const SOUNDS = {
       sheep_idle:   (c, v) => { tone(c, 'triangle', 340, 285, 0.58, v, 0, 11); tone(c, 'sawtooth', 680, 570, 0.52, v * 0.35, 0.02, 11); },
@@ -177,6 +221,10 @@
       shroom_idle:  (c, v) => { tone(c, 'sine', 320, 250, 0.3, v); tone(c, 'sine', 250, 330, 0.25, v, 0.3); },
       shroom_spit:  (c, v) => { noise(c, 0.28, v, 2600); tone(c, 'sine', 700, 200, 0.2, v * 0.6); },
       shroom_hurt:  (c, v) => tone(c, 'sine', 520, 240, 0.25, v),
+      fish_idle:    (c, v) => { tone(c, 'sine', 880, 1240, 0.055, v * 0.5); tone(c, 'sine', 1180, 760, 0.05, v * 0.45, 0.07); },
+      fish_hurt:    (c, v) => { noise(c, 0.12, v * 0.45, 2600); tone(c, 'triangle', 760, 420, 0.11, v * 0.6); },
+      villager_idle:(c, v) => { tone(c, 'triangle', 240, 205, 0.15, v * 0.7); tone(c, 'triangle', 300, 250, 0.17, v * 0.55, 0.18); },
+      villager_hurt:(c, v) => { tone(c, 'triangle', 430, 260, 0.26, v, 0, 9); noise(c, 0.1, v * 0.25, 900); },
       born:         (c, v) => { tone(c, 'sine', 620, 930, 0.16, v); tone(c, 'sine', 830, 1240, 0.2, v, 0.14); },
       poison:       (c, v) => { noise(c, 0.4, v, 900); tone(c, 'sine', 300, 120, 0.4, v); },
       shot:         (c, v) => { noise(c, 0.14, v * 1.6, 1400, 'lowpass'); tone(c, 'square', 190, 55, 0.11, v); },
@@ -189,17 +237,24 @@
         if (c && play && volume > 0) play(c, Math.min(volume, 1) * 0.22);
       } catch (e) { /* ses yoksa oyun sessiz sürer */ }
     };
+    let lastMobsB64 = '';
+    let lastFarmingB64 = '';
     window.__saveMobs = function (bytes) {
       try {
         let bin = '';
         for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-        localStorage.setItem('voxelcraft_mobs', btoa(bin));
+        const b64 = btoa(bin);
+        if (b64 !== lastMobsB64) {
+          lastMobsB64 = b64;
+          localStorage.setItem('voxelcraft_mobs', b64);
+        }
       } catch (e) { /* depolama kapalıysa sessizce geç */ }
     };
     window.__loadMobs = function () {
       try {
         const b64 = localStorage.getItem('voxelcraft_mobs');
         if (!b64) return new Uint8Array(0);
+        lastMobsB64 = b64;
         const bin = atob(b64);
         const out = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -212,13 +267,18 @@
       try {
         let bin = '';
         for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-        localStorage.setItem('voxelcraft_farming', btoa(bin));
+        const b64 = btoa(bin);
+        if (b64 !== lastFarmingB64) {
+          lastFarmingB64 = b64;
+          localStorage.setItem('voxelcraft_farming', b64);
+        }
       } catch (e) { /* depolama kapalıysa sessizce geç */ }
     };
     window.__loadFarming = function () {
       try {
         const b64 = localStorage.getItem('voxelcraft_farming');
         if (!b64) return new Uint8Array(0);
+        lastFarmingB64 = b64;
         const bin = atob(b64);
         const out = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -227,6 +287,216 @@
         return new Uint8Array(0);
       }
     };
+
+    // --- Çok Oyunculu WebSocket + Server List Ping (SLP) Köprüsü ---
+    let ws = null;
+    let wsConnected = false;
+    let rxChunks = [];
+    let rxTotal = 0;
+    let pendingChat = '';
+
+    const nameInput = document.getElementById('playerName');
+    const urlInput = document.getElementById('serverUrl');
+    const slpStatus = document.getElementById('slpStatus');
+    const pingBtn = document.getElementById('pingBtn');
+    const connectBtn = document.getElementById('connectBtn');
+    const mpBox = document.getElementById('mpBox');
+    const chatBar = document.getElementById('chatBar');
+    const chatInput = document.getElementById('chatInput');
+
+    if (mpBox) {
+      mpBox.addEventListener('click', (e) => e.stopPropagation());
+      mpBox.addEventListener('mousedown', (e) => e.stopPropagation());
+    }
+    if (nameInput) {
+      nameInput.value = localStorage.getItem('voxelcraft_name') || ('Oyuncu' + Math.floor(10 + Math.random() * 89));
+      nameInput.addEventListener('change', () => {
+        try { localStorage.setItem('voxelcraft_name', nameInput.value.trim()); } catch (e) {}
+      });
+    }
+    if (urlInput) {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = location.host || 'localhost:8080';
+      urlInput.value = proto + '//' + host;
+    }
+
+    window.__playerName = function () {
+      return (nameInput && nameInput.value.trim()) || 'Oyuncu';
+    };
+    window.__wsState = function () {
+      return wsConnected && ws && ws.readyState === WebSocket.OPEN ? 1 : 0;
+    };
+    window.__wsSend = function (bytes) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(bytes);
+      }
+    };
+    window.__wsDrain = function () {
+      if (rxTotal === 0) return new Uint8Array(0);
+      const out = new Uint8Array(rxTotal);
+      let off = 0;
+      for (let i = 0; i < rxChunks.length; i++) {
+        out.set(rxChunks[i], off);
+        off += rxChunks[i].length;
+      }
+      rxChunks = [];
+      rxTotal = 0;
+      return out;
+    };
+    window.__chatOpen = function () {
+      return !!(chatBar && !chatBar.classList.contains('hide'));
+    };
+    window.__openChat = function () {
+      if (!chatBar || !chatInput) return;
+      chatBar.classList.remove('hide');
+      chatInput.value = '';
+      setTimeout(() => chatInput.focus(), 10);
+    };
+    window.__takeChatInput = function () {
+      const msg = pendingChat;
+      pendingChat = '';
+      return msg;
+    };
+
+    if (chatInput) {
+      chatInput.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const v = chatInput.value.trim();
+          if (v) pendingChat = v;
+          chatInput.value = '';
+          chatBar.classList.add('hide');
+          const gl = document.getElementById('gl');
+          if (gl && window.__requestLock) window.__requestLock(gl);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          chatInput.value = '';
+          chatBar.classList.add('hide');
+          const gl = document.getElementById('gl');
+          if (gl && window.__requestLock) window.__requestLock(gl);
+        }
+      });
+    }
+
+    function connectMultiplayer(url) {
+      try {
+        if (ws) { try { ws.close(); } catch (e) {} }
+        wsConnected = false;
+        rxChunks = [];
+        rxTotal = 0;
+        ws = new WebSocket(url);
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => {
+          wsConnected = true;
+          if (connectBtn) connectBtn.textContent = 'Bağlı ✓';
+          if (slpStatus) slpStatus.textContent = 'Çok Oyunculu Sunucuya Bağlandı (' + url + ')';
+        };
+        ws.onmessage = (ev) => {
+          if (ev.data instanceof ArrayBuffer) {
+            const u8 = new Uint8Array(ev.data);
+            rxChunks.push(u8);
+            rxTotal += u8.length;
+          }
+        };
+        ws.onclose = () => {
+          wsConnected = false;
+          if (connectBtn) connectBtn.textContent = 'Sunucuya Bağlan';
+        };
+        ws.onerror = () => {
+          wsConnected = false;
+        };
+      } catch (e) {
+        wsConnected = false;
+      }
+    }
+
+    // Minecraft Protokolü Server List Ping (Handshaking[Intent=1] -> StatusRequest + Ping)
+    function queryServerStatus(url, autoConnectIfOnline) {
+      if (!slpStatus) return;
+      try {
+        const probe = new WebSocket(url);
+        probe.binaryType = 'arraybuffer';
+        let pingStart = 0;
+        let motdText = '';
+        let onlinePlayers = 0;
+        let maxPlayers = 0;
+        probe.onopen = () => {
+          // Handshake: [len=15, id=0x00, proto=1, addr="localhost"(9), port=8080(0x1f90), intent=1(Status)]
+          const hs = new Uint8Array([15, 0x00, 0x01, 9, 108,111,99,97,108,104,111,115,116, 0x1f, 0x90, 0x01]);
+          // StatusRequest: [len=1, id=0x00]
+          const sr = new Uint8Array([1, 0x00]);
+          // Ping: [len=9, id=0x01, i64 payload]
+          const pg = new Uint8Array([9, 0x01, 0,0,0,0,0,0,0x10,0x92]);
+          pingStart = performance.now();
+          probe.send(hs);
+          probe.send(sr);
+          probe.send(pg);
+        };
+        probe.onmessage = (ev) => {
+          if (!(ev.data instanceof ArrayBuffer)) return;
+          const b = new Uint8Array(ev.data);
+          // Basit VarInt okuyucu
+          let p = 0;
+          function readVarInt() {
+            let val = 0, shift = 0;
+            while (p < b.length) {
+              const byte = b[p++];
+              val |= (byte & 0x7f) << shift;
+              if ((byte & 0x80) === 0) return val;
+              shift += 7;
+            }
+            return 0;
+          }
+          while (p < b.length) {
+            const frameLen = readVarInt();
+            const end = p + frameLen;
+            const pktId = readVarInt();
+            if (pktId === 0x00) {
+              const strLen = readVarInt();
+              const jsonBytes = b.subarray(p, p + strLen);
+              const jsonStr = new TextDecoder().decode(jsonBytes);
+              try {
+                const info = JSON.parse(jsonStr);
+                motdText = (info.description && info.description.text) || 'VoxelCraft';
+                onlinePlayers = (info.players && info.players.online) || 0;
+                maxPlayers = (info.players && info.players.max) || 32;
+              } catch (e) {}
+            } else if (pktId === 0x01) {
+              const rtt = Math.max(1, Math.round(performance.now() - pingStart));
+              slpStatus.textContent = '🟢 ' + motdText + ' — Oyuncular: ' + onlinePlayers + '/' + maxPlayers + ' · Ping: ' + rtt + ' ms';
+              try { probe.close(); } catch (e) {}
+              if (autoConnectIfOnline && !wsConnected) {
+                connectMultiplayer(url);
+              }
+            }
+            p = end;
+          }
+        };
+        probe.onerror = () => {
+          slpStatus.textContent = '⚪ Çevrimdışı (Tek Oyunculu Mod — sunucu için: ./build.cmd serve 8080)';
+        };
+      } catch (e) {
+        slpStatus.textContent = '⚪ Çevrimdışı (Tek Oyunculu Mod)';
+      }
+    }
+
+    if (pingBtn) {
+      pingBtn.addEventListener('click', () => {
+        if (urlInput) queryServerStatus(urlInput.value.trim(), false);
+      });
+    }
+    if (connectBtn) {
+      connectBtn.addEventListener('click', () => {
+        if (urlInput) connectMultiplayer(urlInput.value.trim());
+      });
+    }
+    // Sayfa HTTP üzerinden sunulduğunda sunucu durumunu otomatik sorgula ve aktifse bağlan
+    if (location.protocol.startsWith('http') && urlInput) {
+      setTimeout(() => queryServerStatus(urlInput.value.trim(), true), 150);
+    } else if (slpStatus) {
+      slpStatus.textContent = '⚪ Yerel Dosya (Tek Oyunculu Mod)';
+    }
   })();
 </script>
 

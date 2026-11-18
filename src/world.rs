@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::blocks::*;
-use crate::noise::{hash3f, Perlin};
+use crate::noise::{hash2f, hash3f, Perlin};
 
 pub const CHUNK_SIZE: i32 = 16;
 pub const CHUNK_AREA: usize = 256; // CHUNK_SIZE^2
@@ -55,6 +55,9 @@ pub struct Chunk {
     /// (fazladan taranan katman zararsızdır, eksik taranan katman görünmez
     /// duvar demektir).
     pub min_open: i32,
+    /// Bu chunk'taki bitki ve ekin hücrelerinin `(yerel [x, y, z], blok_id)` önbelleği.
+    /// `refresh_torches` her seferinde 16.384 hücreyi taramak yerine doğrudan bunu okur.
+    pub plants: Vec<([u8; 3], u8)>,
 }
 
 pub struct World {
@@ -113,7 +116,15 @@ impl World {
                 Some(c) => c,
                 None => return false,
             };
+            let old = ch.data[idx];
             ch.data[idx] = v;
+            let local = [(x & 15) as u8, y as u8, (z & 15) as u8];
+            if is_plant(old) {
+                ch.plants.retain(|&(p, _)| p != local);
+            }
+            if is_plant(v) {
+                ch.plants.push((local, v));
+            }
             if y > ch.content_top {
                 ch.content_top = y;
             }
@@ -174,6 +185,11 @@ impl World {
             }
         }
 
+        // Köyler: yerleşim planı ağaçlardan önce hesaplanır ki evlerin içine
+        // ağaç dikilmesin. Evler ağaçlardan sonra yazılır: 9×9'luk alan
+        // temizlendiği için taşan yapraklar da silinir.
+        let villages = self.villages_near(cx, cz);
+
         // Ağaçlar 3 blok taşma payıyla taranır: chunk sınırına denk gelen bir
         // ağaç ikiye bölünse de her iki tarafta tutarlı çıkar.
         let terrain_top = content_top;
@@ -188,23 +204,41 @@ impl World {
                 if h <= SEA_LEVEL + 1 {
                     continue;
                 }
+                if villages.iter().any(|v| v.blocks_tree(wx, wz)) {
+                    continue;
+                }
                 content_top = content_top.max(place_tree(&mut data, x, h + 1, z, wx, wz));
             }
+        }
+
+        // Köy evleri ve kuyu. Her chunk yalnızca kendi hücrelerine düşen
+        // blokları yazar; komşu chunk aynı planı yeniden üretir.
+        if !villages.is_empty() {
+            let mut writer = Writer { data: &mut data, x0, z0, top: content_top };
+            for v in &villages {
+                self.write_village(&mut writer, v);
+            }
+            content_top = writer.top;
         }
 
         // Yabani bitkiler: çimenlerde ot, gelincik ve karahindiba; kıyı kumunda
         // şeker kamışı. En yüksek arazi sütununun üstüne konmaz ki küp mesh'i
         // her zaman chunk'ın en yüksek bloğunu kapsasın.
+        let mut plants = Vec::with_capacity(24);
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let wx = x0 + x;
                 let wz = z0 + z;
+                if villages.iter().any(|v| v.blocks_tree(wx, wz)) {
+                    continue;
+                }
                 let h = self.height_at(wx, wz);
                 if h + 2 <= terrain_top {
                     if let Some(plant) = wild_plant_at(wx, wz, h) {
                         let idx = li(x as usize, z as usize, (h + 1) as usize);
                         if data[idx] == AIR {
                             data[idx] = plant;
+                            plants.push(([x as u8, (h + 1) as u8, z as u8], plant));
                         }
                     }
                 }
@@ -217,8 +251,18 @@ impl World {
 
         if let Some(ed) = self.edits.get(&key) {
             for (&idx, &v) in ed {
+                let old = data[idx];
                 data[idx] = v;
+                let lx = (idx % CHUNK_SIZE as usize) as u8;
+                let lz = ((idx / CHUNK_SIZE as usize) % CHUNK_SIZE as usize) as u8;
                 let y = (idx / CHUNK_AREA) as i32;
+                let local = [lx, y as u8, lz];
+                if is_plant(old) {
+                    plants.retain(|&(p, _)| p != local);
+                }
+                if is_plant(v) {
+                    plants.push((local, v));
+                }
                 if y > content_top {
                     content_top = y;
                 }
@@ -230,7 +274,7 @@ impl World {
 
         self.chunks.insert(
             key,
-            Chunk { cx, cz, data, meshed: false, content_top, min_open },
+            Chunk { cx, cz, data, meshed: false, content_top, min_open, plants },
         );
         key
     }
@@ -282,10 +326,293 @@ impl World {
             if tree || wild_plant_at(xi, zi, h).is_some() {
                 continue;
             }
+            // Evin içine doğmayalım.
+            let cell = (xi.div_euclid(VILLAGE_CELL), zi.div_euclid(VILLAGE_CELL));
+            if self.village_at(cell.0, cell.1).is_some_and(|v| v.blocks_tree(xi, zi)) {
+                continue;
+            }
             return [xi as f64 + 0.5, h as f64 + 1.02, zi as f64 + 0.5];
         }
         let h = self.height_at(0, 0);
         [0.5, h as f64 + 1.02, 0.5]
+    }
+
+    // ---- Köyler ----------------------------------------------------------
+
+    /// Bir köy hücresinin köyü (yoksa `None`). Tamamen koordinatlardan
+    /// türetilir: aynı hücre her zaman aynı köyü verir, chunk'ın yüklenme
+    /// sırası sonucu değiştirmez.
+    pub fn village_at(&self, vcx: i32, vcz: i32) -> Option<Village> {
+        // Hücrelerin yaklaşık yarısında köy var; gerisi boş kır.
+        if hash2f(vcx, vcz, 0x51ad_1f03) > 0.45 {
+            return None;
+        }
+        let cx = vcx * VILLAGE_CELL + 52 + (hash2f(vcx, vcz, 0x2b71_9c17) * 56.0) as i32;
+        let cz = vcz * VILLAGE_CELL + 52 + (hash2f(vcx, vcz, 0x77c3_4a1d) * 56.0) as i32;
+        let h = self.height_at(cx, cz);
+        // Alçak kır: deniz seviyesinin belirgin üstünde, yüksek dağlarda değil.
+        if h <= SEA_LEVEL + 2 || h > SEA_LEVEL + 13 {
+            return None;
+        }
+        // Düzlük: köy alanındaki en alçak ve en yüksek sütun birbirine yakın
+        // olmalı; evler uçurumun kenarına kurulmaz.
+        let (mut lo, mut hi) = (h, h);
+        let mut dz = -VILLAGE_RADIUS;
+        while dz <= VILLAGE_RADIUS {
+            let mut dx = -VILLAGE_RADIUS;
+            while dx <= VILLAGE_RADIUS {
+                if dx * dx + dz * dz <= VILLAGE_RADIUS * VILLAGE_RADIUS {
+                    let hh = self.height_at(cx + dx, cz + dz);
+                    lo = lo.min(hh);
+                    hi = hi.max(hh);
+                }
+                dx += 3;
+            }
+            dz += 3;
+        }
+        if hi - lo > 3 || lo <= SEA_LEVEL + 1 {
+            return None;
+        }
+        let base = hi;
+        // 2–5 ev, merkezin çevresine eşit açılarla (hafif sapmayla) dağıtılır.
+        let n = 2 + (hash2f(vcx, vcz, 0x5d31_2b07) * 4.0) as usize;
+        let mut houses = Vec::with_capacity(n);
+        for i in 0..n {
+            let jitter = (hash2f(vcx * 31 + i as i32, vcz * 17 + i as i32, 0x3f21_8c05) - 0.5) * 0.5;
+            let a = i as f64 / n as f64 * std::f64::consts::TAU + jitter;
+            let r = 12.0 + hash2f(vcx * 13 + i as i32, vcz * 29 + i as i32, 0x6a17_2d03) * 8.0;
+            let hx = cx + (a.cos() * r).round() as i32;
+            let hz = cz + (a.sin() * r).round() as i32;
+            // Evin tabanı: ayak izindeki en yüksek sütun; altı doldurulur.
+            let mut hb = self.height_at(hx, hz);
+            for ddz in -3..=3 {
+                for ddx in -3..=3 {
+                    hb = hb.max(self.height_at(hx + ddx, hz + ddz));
+                }
+            }
+            let (sx, sz) = (if cx >= hx { 1 } else { -1 }, if cz >= hz { 1 } else { -1 });
+            let (door, out, dir) = if (cx - hx).abs() >= (cz - hz).abs() {
+                ([hx + sx * 3, hz], [hx + sx * 4, hz], [sx, 0])
+            } else {
+                ([hx, hz + sz * 3], [hx, hz + sz * 4], [0, sz])
+            };
+            houses.push(House { x: hx, z: hz, base: hb, door, out, dir });
+        }
+        Some(Village { cx, cz, base, houses })
+    }
+
+    /// Bu chunk'a taşan köyler. Köy hücresi chunk'tan geniş olduğu için en
+    /// fazla dört hücre denetlenir.
+    pub fn villages_near(&self, cx: i32, cz: i32) -> Vec<Village> {
+        let (x0, z0) = (cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+        let m = VILLAGE_RADIUS + 10;
+        let (c0x, c1x) = ((x0 - m).div_euclid(VILLAGE_CELL), (x0 + CHUNK_SIZE + m).div_euclid(VILLAGE_CELL));
+        let (c0z, c1z) = ((z0 - m).div_euclid(VILLAGE_CELL), (z0 + CHUNK_SIZE + m).div_euclid(VILLAGE_CELL));
+        let mut out = Vec::new();
+        for vcz in c0z..=c1z {
+            for vcx in c0x..=c1x {
+                if let Some(v) = self.village_at(vcx, vcz) {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
+    /// Oyuncunun çevresindeki **gerçekten üretilmiş** evlerin kapı eşikleri —
+    /// köylülerin evi. Ev henüz üretilmemişse (chunk yüklü değilse) atlanır.
+    pub fn village_homes(&self, x: i32, z: i32, radius: i32) -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        let (c0x, c1x) = ((x - radius).div_euclid(VILLAGE_CELL), (x + radius).div_euclid(VILLAGE_CELL));
+        let (c0z, c1z) = ((z - radius).div_euclid(VILLAGE_CELL), (z + radius).div_euclid(VILLAGE_CELL));
+        for vcz in c0z..=c1z {
+            for vcx in c0x..=c1x {
+                let Some(v) = self.village_at(vcx, vcz) else { continue };
+                for h in &v.houses {
+                    if (h.x - x).abs() > radius || (h.z - z).abs() > radius {
+                        continue;
+                    }
+                    // Kapı boşluğu ve tahta döşeme yerinde olmalı: yalnızca
+                    // gerçekten üretilmiş evler köylü barındırır.
+                    if self.get_block(h.door[0], h.base, h.door[1]) != PLANKS
+                        || self.get_block(h.door[0], h.base + 1, h.door[1]) != AIR
+                    {
+                        continue;
+                    }
+                    out.push([h.door[0] as f64 + 0.5, h.base as f64 + 1.0, h.door[1] as f64 + 0.5]);
+                }
+            }
+        }
+        out
+    }
+
+    /// Köyün kuyusunu ve bütün evlerini bu chunk'a yazar.
+    fn write_village(&self, w: &mut Writer, v: &Village) {
+        // Kuyu: 3×3 parke taşı bilezik, ortasında su.
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let (wx, wz) = (v.cx + dx, v.cz + dz);
+                let g = self.height_at(wx, wz);
+                for y in (g + 1)..=v.base {
+                    w.set(wx, y, wz, DIRT);
+                }
+                for y in (v.base + 1)..=(v.base + 4) {
+                    w.set(wx, y, wz, AIR);
+                }
+                let b = if dx == 0 && dz == 0 { WATER } else { COBBLE };
+                w.set(wx, v.base, wz, b);
+                if dx != 0 || dz != 0 {
+                    w.set(wx, v.base + 1, wz, COBBLE);
+                }
+            }
+        }
+        for h in &v.houses {
+            self.write_house(w, h);
+        }
+    }
+
+    /// Tek bir ev: zemin düzlenir; döşeme, duvarlar, pencereler, kapı, patika
+    /// ve çatı yazılır. Chunk dışına düşen hücreler `Writer` tarafından atlanır.
+    fn write_house(&self, w: &mut Writer, h: &House) {
+        let (hx, hz, base) = (h.x, h.z, h.base);
+        // 1) 9×9 alan: altını doldur, üstünü temizle (ağaç, ot, kar).
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                let (wx, wz) = (hx + dx, hz + dz);
+                let g = self.height_at(wx, wz);
+                for y in (g + 1)..=base {
+                    w.set(wx, y, wz, DIRT);
+                }
+                for y in (base + 1)..=(base + 7) {
+                    w.set(wx, y, wz, AIR);
+                }
+            }
+        }
+        // 2) Tahta döşeme.
+        for dz in -3..=3 {
+            for dx in -3..=3 {
+                w.set(hx + dx, base, hz + dz, PLANKS);
+            }
+        }
+        // 3) Duvarlar: köşeler kütük, ilk sıra parke taşı, üstü tahta.
+        for dz in -3..=3i32 {
+            for dx in -3..=3i32 {
+                let (ex, ez) = (dx.abs() == 3, dz.abs() == 3);
+                if !ex && !ez {
+                    continue;
+                }
+                let corner = ex && ez;
+                for y in 1..=3 {
+                    let b = if corner {
+                        LOG
+                    } else if y == 1 {
+                        COBBLE
+                    } else {
+                        PLANKS
+                    };
+                    w.set(hx + dx, base + y, hz + dz, b);
+                }
+                // 4) Pencereler: her duvarda iki cam.
+                if (ex && dz.abs() == 2) || (ez && dx.abs() == 2) {
+                    w.set(hx + dx, base + 2, hz + dz, GLASS);
+                }
+            }
+        }
+        // 5) Kapı: 1×2 boşluk; önünde eşik ve taş patika.
+        w.set(h.door[0], base + 1, h.door[1], AIR);
+        w.set(h.door[0], base + 2, h.door[1], AIR);
+        for i in 1..=4 {
+            let (wx, wz) = (h.door[0] + h.dir[0] * i, h.door[1] + h.dir[1] * i);
+            w.set(wx, base, wz, COBBLE);
+            w.set(wx, base + 1, wz, AIR);
+        }
+        // 6) Çatı: 9×9 saçak, üstünde 5×5 ikinci kat.
+        for dz in -4..=4i32 {
+            for dx in -4..=4i32 {
+                if dx.abs() == 4 && dz.abs() == 4 {
+                    continue;
+                }
+                w.set(hx + dx, base + 4, hz + dz, PLANKS);
+            }
+        }
+        for dz in -2..=2 {
+            for dx in -2..=2 {
+                w.set(hx + dx, base + 5, hz + dz, PLANKS);
+            }
+        }
+        // 7) İç meşale, kapı yanında meşale ve ara sıra çalışma tezgahı.
+        w.set(hx - 2, base + 1, hz - 2, TORCH);
+        let (px, pz) = (h.dir[1], h.dir[0]); // kapı yönünün dikmesi
+        w.set(h.out[0] + px, base + 1, h.out[1] + pz, TORCH);
+        if hash2f(hx, hz, 0x2f19_6b11) > 0.5 {
+            w.set(hx + 2, base + 1, hz + 2, CRAFT_TABLE);
+        }
+    }
+}
+
+// ---- Köyler --------------------------------------------------------------
+
+/// Köy hücresi boyu (blok): her hücrede en fazla bir köy bulunur. Evler
+/// hücrenin ortasına yerleştiği için komşu hücrelerin köyleri üst üste binmez.
+pub const VILLAGE_CELL: i32 = 160;
+/// Köy merkezinden en uzak evin merkezine olan yatay uzaklık (blok).
+pub const VILLAGE_RADIUS: i32 = 26;
+
+/// Köydeki tek bir ev. Kapı her zaman köyün merkezine bakar.
+#[derive(Clone, Debug)]
+pub struct House {
+    pub x: i32,
+    pub z: i32,
+    /// Evin tabanı: tahta döşemenin bulunduğu `y`.
+    pub base: i32,
+    /// Kapı boşluğunun hücresi.
+    pub door: [i32; 2],
+    /// Kapının dışındaki basamak (köylünün "evi" buradır).
+    pub out: [i32; 2],
+    /// Kapının baktığı yön (birim vektör).
+    pub dir: [i32; 2],
+}
+
+/// Bir köy: merkez, düzlenmiş zemin seviyesi ve evleri.
+#[derive(Clone, Debug)]
+pub struct Village {
+    pub cx: i32,
+    pub cz: i32,
+    pub base: i32,
+    pub houses: Vec<House>,
+}
+
+impl Village {
+    /// Bu sütuna ağaç ya da bitki dikilmesin mi? (Ev ayak izi + bir blok pay,
+    /// kuyu çevresi.)
+    pub fn blocks_tree(&self, x: i32, z: i32) -> bool {
+        if (x - self.cx).abs() <= 4 && (z - self.cz).abs() <= 4 {
+            return true;
+        }
+        self.houses.iter().any(|h| (x - h.x).abs() <= 5 && (z - h.z).abs() <= 5)
+    }
+}
+
+/// Chunk verisine yazan küçük yardımcı: chunk dışına düşen hücreleri atlar ve
+/// yazılan en yüksek `y` değerini izler (`content_top` için).
+struct Writer<'a> {
+    data: &'a mut [u8],
+    x0: i32,
+    z0: i32,
+    top: i32,
+}
+
+impl Writer<'_> {
+    fn set(&mut self, wx: i32, wy: i32, wz: i32, b: u8) {
+        let (lx, lz) = (wx - self.x0, wz - self.z0);
+        if !(0..CHUNK_SIZE).contains(&lx) || !(0..CHUNK_SIZE).contains(&lz) {
+            return;
+        }
+        if !(0..WORLD_HEIGHT).contains(&wy) {
+            return;
+        }
+        self.data[li(lx as usize, lz as usize, wy as usize)] = b;
+        self.top = self.top.max(wy);
     }
 }
 
@@ -713,5 +1040,116 @@ mod tests {
         assert!(grass_plants > 20, "çimenlerde yabani ot üretilmeli: {grass_plants}");
         assert!(flowers > 5, "çimenlerde gelincik ve karahindiba üretilmeli: {flowers}");
         assert!(cane > 0, "kıyılarda şeker kamışı üretilmeli: {cane}");
+    }
+
+    /// Yakınlardaki ilk köyü bulur (testler için).
+    fn near_village(w: &World) -> Village {
+        for vcz in -8..=8 {
+            for vcx in -8..=8 {
+                if let Some(v) = w.village_at(vcx, vcz) {
+                    return v;
+                }
+            }
+        }
+        panic!("yakınlarda köy yok");
+    }
+
+    /// Köyün çevresindeki bütün chunk'ları üretir.
+    fn load_village(w: &mut World, v: &Village) {
+        let r = VILLAGE_RADIUS + 8;
+        for cz in ((v.cz - r) >> 4)..=((v.cz + r) >> 4) {
+            for cx in ((v.cx - r) >> 4)..=((v.cx + r) >> 4) {
+                w.generate_chunk(cx, cz);
+            }
+        }
+    }
+
+    #[test]
+    fn villages_are_flat_levelled_and_have_doors() {
+        let mut w = world();
+        let v = near_village(&w);
+        load_village(&mut w, &v);
+
+        assert!((2..=5).contains(&v.houses.len()), "ev sayısı: {}", v.houses.len());
+        assert!(v.base > SEA_LEVEL + 1, "köy deniz seviyesinin üstünde olmalı");
+        for h in &v.houses {
+            // Döşeme, duvarlar, kapı boşluğu ve çatı.
+            assert_eq!(w.get_block(h.x, h.base, h.z), PLANKS, "döşeme yok");
+            assert_eq!(w.get_block(h.door[0], h.base + 1, h.door[1]), AIR, "kapı kapalı");
+            assert_eq!(w.get_block(h.door[0], h.base + 2, h.door[1]), AIR, "kapı alçak");
+            assert_eq!(w.get_block(h.door[0], h.base + 3, h.door[1]), PLANKS, "kapı üstü açık");
+            assert_eq!(w.get_block(h.x, h.base + 4, h.z), PLANKS, "çatı yok");
+            assert_eq!(w.get_block(h.x - 3, h.base + 2, h.z - 3), LOG, "köşe kütüğü yok");
+            // Ev havada asılı kalmamalı: döşemenin altı dolu.
+            for dz in -3..=3 {
+                for dx in -3..=3 {
+                    let (x, z) = (h.x + dx, h.z + dz);
+                    let below = w.get_block(x, h.base - 1, z);
+                    assert!(is_solid(below), "({x},{z}) evin altı boş: {below}");
+                }
+            }
+        }
+        // Kuyu: ortasında su, çevresinde taş bilezik.
+        if v.houses.len() >= 3 {
+            assert_eq!(w.get_block(v.cx, v.base, v.cz), WATER, "kuyuda su yok");
+            assert_eq!(w.get_block(v.cx + 1, v.base + 1, v.cz), COBBLE, "kuyu bileziği yok");
+        }
+    }
+
+    #[test]
+    fn villages_keep_trees_and_plants_out_of_houses() {
+        let mut w = world();
+        let v = near_village(&w);
+        load_village(&mut w, &v);
+        for h in &v.houses {
+            // Yalnızca iç mekân: duvarlar (|dx| = 3) kütük ve tahtadır.
+            for dz in -2..=2 {
+                for dx in -2..=2 {
+                    let (x, z) = (h.x + dx, h.z + dz);
+                    for y in (h.base + 1)..=(h.base + 3) {
+                        let b = w.get_block(x, y, z);
+                        assert!(
+                            b != LOG && b != LEAVES,
+                            "evin içine ağaç girmiş: ({x},{y},{z})"
+                        );
+                        assert!(!is_plant(b), "evin içine bitki dikilmiş: ({x},{y},{z})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn village_plan_does_not_depend_on_generation_order() {
+        let mut a = world();
+        let v = near_village(&a);
+        let (cx, cz) = (v.cx >> 4, v.cz >> 4);
+        a.generate_chunk(cx, cz);
+        let solo = a.chunks[&ckey(cx, cz)].data.clone();
+
+        let mut b = world();
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1)] {
+            b.generate_chunk(cx + dx, cz + dz);
+        }
+        b.generate_chunk(cx, cz);
+        assert_eq!(solo, b.chunks[&ckey(cx, cz)].data, "köy üretimi sıraya bağlı");
+    }
+
+    #[test]
+    fn village_homes_are_the_doorsteps() {
+        let mut w = world();
+        let v = near_village(&w);
+        load_village(&mut w, &v);
+        let homes = w.village_homes(v.cx, v.cz, VILLAGE_RADIUS + 8);
+        assert_eq!(homes.len(), v.houses.len(), "her evin bir kapı eşiği olmalı");
+        for (home, h) in homes.iter().zip(v.houses.iter()) {
+            assert!((home[0] - (h.door[0] as f64 + 0.5)).abs() < 1e-9);
+            assert!((home[2] - (h.door[1] as f64 + 0.5)).abs() < 1e-9);
+            assert!((home[1] - (h.base as f64 + 1.0)).abs() < 1e-9);
+        }
+        assert!(w.village_homes(v.cx + 400, v.cz, 8).is_empty(), "uzakta ev yok");
+        // Chunk'lar yüklü değilken ev sayılmaz (hayalet köylü doğmasın).
+        let empty = world();
+        assert!(empty.village_homes(v.cx, v.cz, VILLAGE_RADIUS + 8).is_empty());
     }
 }

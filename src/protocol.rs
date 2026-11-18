@@ -484,6 +484,29 @@ pub enum Packet {
     /// Bir bloğun yüzüne eşya kullanıldı (`Use Item On` — çapalama, tohum ekme,
     /// kemik tozu / gübreleme, blok yerleştirme).
     UseItemOn { pos: Position, face: Face, item_id: i32 },
+    /// Sunucu oyuncuyu dünyaya kabul etti (`Login (play)`): oyuncu varlık kimliği,
+    /// dünya tohumu (`seed`) ve gün saati (`0.0..1.0`).
+    JoinGame { player_id: i32, seed: i32, day_time: f32 },
+    /// Başka bir oyuncu görünür alana girdi (`Spawn Player`).
+    SpawnPlayer { player_id: i32, name: String, x: f64, y: f64, z: f64, yaw: Angle, pitch: Angle },
+    /// Bir varlığın (uzak oyuncu ya da canlı) konumu ve yönü güncellendi (`Update Entity Position and Rotation`).
+    MoveEntity { entity_id: i32, x: f64, y: f64, z: f64, yaw: Angle, pitch: Angle, hurt: bool },
+    /// Bir veya daha fazla varlık dünyadan kaldırıldı (`Remove Entities`).
+    RemoveEntities { entity_ids: Vec<i32> },
+    /// Sunucudan sohbet veya sistem iletisi (`System Chat Message`).
+    SystemChat { sender: String, message: String },
+    /// Sunucudan oyuncuya hasar / zehir bildirimi (`Hurt Animation` + `Set Health`).
+    EntityDamage { target_player: i32, damage: i32, poison: bool },
+    /// Bağlantıyı canlı tutma (`Keep Alive` — clientbound).
+    KeepAliveClientbound { id: i64 },
+    /// İstemcinin blok kırma veya doğrudan blok değiştirme eylemi (`Player Action`).
+    PlayerAction { pos: Position, block: i32 },
+    /// İstemcinin gönderdiği sohbet iletisi (`Chat Message`).
+    ChatMessage { message: String },
+    /// İstemcinin bir canlıya/varlığa vurması veya yem vermesi (`Interact`).
+    InteractEntity { entity_id: i32, damage: i32, item_id: i32 },
+    /// Bağlantıyı canlı tutma yanıtı (`Keep Alive` — serverbound).
+    KeepAliveServerbound { id: i64 },
 }
 
 impl Packet {
@@ -504,8 +527,19 @@ impl Packet {
             Packet::FinishConfiguration => (Configuration, Clientbound, 0x00),
             Packet::PlayerPosition { .. } => (Play, Serverbound, 0x00),
             Packet::UseItemOn { .. } => (Play, Serverbound, 0x01),
+            Packet::PlayerAction { .. } => (Play, Serverbound, 0x02),
+            Packet::ChatMessage { .. } => (Play, Serverbound, 0x03),
+            Packet::InteractEntity { .. } => (Play, Serverbound, 0x04),
+            Packet::KeepAliveServerbound { .. } => (Play, Serverbound, 0x05),
             Packet::BlockUpdate { .. } => (Play, Clientbound, 0x00),
             Packet::SpawnEntity { .. } => (Play, Clientbound, 0x01),
+            Packet::JoinGame { .. } => (Play, Clientbound, 0x02),
+            Packet::SpawnPlayer { .. } => (Play, Clientbound, 0x03),
+            Packet::MoveEntity { .. } => (Play, Clientbound, 0x04),
+            Packet::RemoveEntities { .. } => (Play, Clientbound, 0x05),
+            Packet::SystemChat { .. } => (Play, Clientbound, 0x06),
+            Packet::EntityDamage { .. } => (Play, Clientbound, 0x07),
+            Packet::KeepAliveClientbound { .. } => (Play, Clientbound, 0x08),
         }
     }
 
@@ -567,6 +601,74 @@ impl Packet {
                 w.var_int(*face as i32);
                 w.var_int(*item_id);
             }
+            Packet::JoinGame { player_id, seed, day_time } => {
+                w.var_int(*player_id);
+                w.var_int(*seed);
+                w.f32(*day_time);
+            }
+            Packet::SpawnPlayer { player_id, name, x, y, z, yaw, pitch } => {
+                if name.is_empty() || name.encode_utf16().count() > 16 {
+                    return Err(Error::InvalidValue);
+                }
+                w.var_int(*player_id);
+                w.string(name);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+                w.angle(*yaw);
+                w.angle(*pitch);
+            }
+            Packet::MoveEntity { entity_id, x, y, z, yaw, pitch, hurt } => {
+                w.var_int(*entity_id);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+                w.angle(*yaw);
+                w.angle(*pitch);
+                w.bool(*hurt);
+            }
+            Packet::RemoveEntities { entity_ids } => {
+                if entity_ids.len() > 4096 {
+                    return Err(Error::TooLong);
+                }
+                w.var_int(entity_ids.len() as i32);
+                for id in entity_ids {
+                    w.var_int(*id);
+                }
+            }
+            Packet::SystemChat { sender, message } => {
+                if sender.encode_utf16().count() > 32 || message.encode_utf16().count() > 256 {
+                    return Err(Error::TooLong);
+                }
+                w.string(sender);
+                w.string(message);
+            }
+            Packet::EntityDamage { target_player, damage, poison } => {
+                w.var_int(*target_player);
+                w.var_int(*damage);
+                w.bool(*poison);
+            }
+            Packet::KeepAliveClientbound { id } | Packet::KeepAliveServerbound { id } => {
+                w.i64(*id);
+            }
+            Packet::PlayerAction { pos, block } => {
+                if !pos.in_range() {
+                    return Err(Error::InvalidValue);
+                }
+                w.position(*pos);
+                w.var_int(*block);
+            }
+            Packet::ChatMessage { message } => {
+                if message.is_empty() || message.encode_utf16().count() > 256 {
+                    return Err(Error::InvalidValue);
+                }
+                w.string(message);
+            }
+            Packet::InteractEntity { entity_id, damage, item_id } => {
+                w.var_int(*entity_id);
+                w.var_int(*damage);
+                w.var_int(*item_id);
+            }
         }
         frame(self.route().2, &w.buf, threshold)
     }
@@ -612,6 +714,26 @@ impl Packet {
                 let item_id = r.var_int()?;
                 Packet::UseItemOn { pos, face, item_id }
             }
+            (Play, Serverbound, 0x02) => {
+                let pos = r.position()?;
+                if !pos.in_range() {
+                    return Err(Error::InvalidValue);
+                }
+                Packet::PlayerAction { pos, block: r.var_int()? }
+            }
+            (Play, Serverbound, 0x03) => {
+                let message = r.string(256)?.to_string();
+                if message.is_empty() {
+                    return Err(Error::InvalidValue);
+                }
+                Packet::ChatMessage { message }
+            }
+            (Play, Serverbound, 0x04) => Packet::InteractEntity {
+                entity_id: r.var_int()?,
+                damage: r.var_int()?,
+                item_id: r.var_int()?,
+            },
+            (Play, Serverbound, 0x05) => Packet::KeepAliveServerbound { id: r.i64()? },
             (Play, Clientbound, 0x00) => Packet::BlockUpdate { pos: r.position()?, block: r.var_int()? },
             (Play, Clientbound, 0x01) => {
                 let entity_id = r.var_int()?;
@@ -627,6 +749,57 @@ impl Packet {
                     yaw: r.angle()?,
                 }
             }
+            (Play, Clientbound, 0x02) => Packet::JoinGame {
+                player_id: r.var_int()?,
+                seed: r.var_int()?,
+                day_time: r.f32()?,
+            },
+            (Play, Clientbound, 0x03) => {
+                let player_id = r.var_int()?;
+                let name = r.string(16)?.to_string();
+                if name.is_empty() {
+                    return Err(Error::InvalidValue);
+                }
+                Packet::SpawnPlayer {
+                    player_id,
+                    name,
+                    x: r.f64()?,
+                    y: r.f64()?,
+                    z: r.f64()?,
+                    yaw: r.angle()?,
+                    pitch: r.angle()?,
+                }
+            }
+            (Play, Clientbound, 0x04) => Packet::MoveEntity {
+                entity_id: r.var_int()?,
+                x: r.f64()?,
+                y: r.f64()?,
+                z: r.f64()?,
+                yaw: r.angle()?,
+                pitch: r.angle()?,
+                hurt: r.bool()?,
+            },
+            (Play, Clientbound, 0x05) => {
+                let len = r.var_int()?;
+                if !(0..=4096).contains(&len) {
+                    return Err(Error::InvalidValue);
+                }
+                let mut entity_ids = Vec::with_capacity(len as usize);
+                for _ in 0..len {
+                    entity_ids.push(r.var_int()?);
+                }
+                Packet::RemoveEntities { entity_ids }
+            }
+            (Play, Clientbound, 0x06) => Packet::SystemChat {
+                sender: r.string(32)?.to_string(),
+                message: r.string(256)?.to_string(),
+            },
+            (Play, Clientbound, 0x07) => Packet::EntityDamage {
+                target_player: r.var_int()?,
+                damage: r.var_int()?,
+                poison: r.bool()?,
+            },
+            (Play, Clientbound, 0x08) => Packet::KeepAliveClientbound { id: r.i64()? },
             _ => return Err(Error::UnknownPacket(id)),
         };
         r.finish()?;
@@ -880,6 +1053,33 @@ mod tests {
                 face: Face::Top,
                 item_id: 110,
             },
+            Packet::JoinGame { player_id: 7, seed: 20261012, day_time: 0.42 },
+            Packet::SpawnPlayer {
+                player_id: 8,
+                name: "Ayşe".into(),
+                x: -14.25,
+                y: 28.0,
+                z: 9.75,
+                yaw: Angle(32),
+                pitch: Angle(250),
+            },
+            Packet::MoveEntity {
+                entity_id: 1004,
+                x: 5.5,
+                y: 26.0,
+                z: -3.25,
+                yaw: Angle(128),
+                pitch: Angle(0),
+                hurt: true,
+            },
+            Packet::RemoveEntities { entity_ids: vec![8, 1004, 1009] },
+            Packet::SystemChat { sender: "Taha".into(), message: "Merhaba sunucu!".into() },
+            Packet::EntityDamage { target_player: 7, damage: 4, poison: false },
+            Packet::KeepAliveClientbound { id: 987654321 },
+            Packet::PlayerAction { pos: Position { x: -4, y: 27, z: 12 }, block: 0 },
+            Packet::ChatMessage { message: "Selam!".into() },
+            Packet::InteractEntity { entity_id: 1004, damage: 7, item_id: 102 },
+            Packet::KeepAliveServerbound { id: 987654321 },
         ];
         for p in packets {
             let (state, dir, id) = p.route();

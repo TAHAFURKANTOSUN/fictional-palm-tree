@@ -31,6 +31,9 @@ pub mod weapons;
 pub mod survival;
 pub mod world;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod net_server;
+
 #[cfg(target_arch = "wasm32")]
 mod app;
 #[cfg(target_arch = "wasm32")]

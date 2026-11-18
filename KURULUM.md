@@ -496,3 +496,26 @@ cargo install wasm-bindgen-cli --version 0.2.129
 
 Linux'ta `cargo install` linker hatası verirse `build-essential` paketini
 kurun. macOS'ta `xcode-select --install` ile komut satırı araçlarını kurun.
+
+### macOS ayrıntıları
+
+```bash
+xcode-select --install                 # clang + linker (bir kez)
+brew install node python               # isteğe bağlı: tek dosya paketleyici + test
+```
+
+- **Apple Silicon:** `cargo install wasm-bindgen-cli --version 0.2.129`
+  kaynaktan derlenir, ilk seferde birkaç dakika sürer. Alternatif olarak
+  GitHub sürümlerinden `aarch64-apple-darwin` ikilisini indirip `PATH`'e koyun.
+- **Başsız test:** `./tools/smoke.sh` macOS'ta da çalışır. Chrome'u
+  `/Applications/Google Chrome.app` altında arar, portu `lsof` ile bulur ve
+  yalnızca kendi başlattığı süreçleri kapatır. Farklı bir tarayıcı için:
+  `CHROME="/Applications/Chromium.app/Contents/MacOS/Chromium" ./tools/smoke.sh`
+- **Kapı bekçisi:** macOS'ta ilk çalıştırmada `build.sh` / `node` için
+  "geliştirici doğrulanamadı" uyarısı çıkarsa Sistem Ayarları → Gizlilik ve
+  Güvenlik → "Yine de aç" deyin.
+- **Oyun içi tuşlar:** hız koşusu `Control`, sağ tık yerine iki parmakla
+  dokunma veya `Control`+tıklama. `F` ile uçuş, `E` ile envanter aynı.
+- **Tek dosya:** `voxelcraft-rs.html` Safari, Chrome, Firefox ve Edge'de
+  (`file://` dâhil) açılır; wasm dosyanın içine gömülüdür.
+

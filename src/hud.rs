@@ -70,6 +70,13 @@ pub struct HudFrame<'a> {
     pub held: Option<Stack>,
     pub mouse: (f64, f64),
     pub debug: DebugInfo,
+    /// Çok oyunculu bağlantı etiketi (ör. `"Çevrimiçi (2 oyuncu)"` ya da `"Tek Oyunculu"`).
+    pub net_label: &'a str,
+    /// Sohbet geçmişi (`(gönderen, mesaj)`) ve değişim sayacı.
+    pub chat: &'a [(String, String)],
+    pub chat_seq: u32,
+    /// Ekrandaki diğer oyuncuların isim etiketleri: `(ad, ekran_x, ekran_y)`.
+    pub nametags: &'a [(String, i32, i32)],
 }
 
 /// Sol üstteki ölçüm panelinin sayıları. Uygulama bunları her karede değil,
@@ -115,6 +122,9 @@ struct HudKey {
     toast: Option<(u32, u8)>,
     /// Yalnızca ölçüm paneli görünürken anlamlıdır.
     debug: DebugInfo,
+    net_label_len: usize,
+    chat_seq: u32,
+    nametags: Vec<(String, i32, i32)>,
 }
 
 pub struct Hud {
@@ -240,6 +250,9 @@ impl Hud {
                 .as_ref()
                 .map(|(_, life)| (self.toast_seq, (Self::toast_alpha(*life) * ALPHA_STEPS).ceil() as u8)),
             debug: if show_debug { f.debug } else { DebugInfo::default() },
+            net_label_len: f.net_label.len(),
+            chat_seq: f.chat_seq,
+            nametags: f.nametags.to_vec(),
         }
     }
 
@@ -829,6 +842,7 @@ impl Hud {
             ("Çizim", format!("{} · {:.0}k üçgen", d.draws, d.tris as f64 / 1000.0)),
             ("Mod", if f.flying { "Uçuş" } else { "Yürüyüş" }.to_string()),
             ("Oyun", f.survival.mode.label().to_string()),
+            ("Ağ", f.net_label.to_string()),
             ("El", hand),
         ];
         let x = 12.0;
@@ -839,6 +853,42 @@ impl Hud {
             ctx.set_global_alpha(1.0);
             self.label(v, x + 62.0, y, 12.5, "#ffffff", "left");
             y += 17.0;
+        }
+    }
+
+    fn draw_chat_and_nametags(&self, f: &HudFrame) {
+        // Uzak oyuncuların baş üstü isim etiketleri
+        for (name, sx, sy) in f.nametags {
+            let (x, y) = (*sx as f64, *sy as f64);
+            let w = (name.chars().count() as f64 * 7.8 + 16.0).max(44.0);
+            let h = 20.0;
+            self.panel_box(
+                Rect { x: x - w / 2.0, y: y - h, w, h },
+                "rgba(10,12,18,0.65)",
+                "rgba(124,226,255,0.35)",
+                6.0,
+            );
+            self.label(name, x, y - h / 2.0 + 0.5, 12.0, "#7ce2ff", "center");
+        }
+
+        // Sol altta sohbet geçmişi (son 6 mesaj)
+        if !f.chat.is_empty() {
+            let start = f.chat.len().saturating_sub(6);
+            let slice = &f.chat[start..];
+            let x = 14.0;
+            let mut y = self.height - 135.0 - (slice.len() as f64 * 22.0);
+            for (sender, msg) in slice {
+                let full = format!("<{sender}> {msg}");
+                let w = (full.chars().count() as f64 * 7.2 + 18.0).clamp(160.0, 460.0);
+                self.panel_box(
+                    Rect { x, y, w, h: 20.0 },
+                    "rgba(8,10,16,0.52)",
+                    "rgba(255,255,255,0.08)",
+                    5.0,
+                );
+                self.label(&full, x + 8.0, y + 10.5, 12.0, "#eaf0f8", "left");
+                y += 22.0;
+            }
         }
     }
 
@@ -888,6 +938,7 @@ impl Hud {
             self.draw_toast();
         } else {
             if f.hud_visible {
+                self.draw_chat_and_nametags(f);
                 self.draw_crosshair();
                 for (i, r) in l.hotbar.iter().enumerate() {
                     self.slot(*r, inv.slots[i], i == inv.selected, Some(i));

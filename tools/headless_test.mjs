@@ -17,10 +17,12 @@
 //   node tools/headless_test.mjs
 //
 // !! TEMİZLİK UYARISI !!
-//   Chrome'u `taskkill /F /IM chrome.exe` ile KAPATMAYIN. `/IM` görüntü adına
-//   göre eşleşir ve kullanıcının açık Chrome pencerelerini de zorla kapatır.
+//   Chrome'u görüntü adına göre topluca KAPATMAYIN (`taskkill /F /IM chrome.exe`,
+//   `pkill chrome`): kullanıcının açık Chrome pencerelerini de kapatır.
 //   Yalnızca kendi başlattığınız süreci kapatın:
-//     taskkill /F /T /PID <CDP portunu dinleyen PID>
+//     Windows:  taskkill /F /T /PID <CDP portunu dinleyen PID>
+//     macOS/Linux: kill <CDP portunu dinleyen PID>
+//   Bunu sizin için ./tools/smoke.sh yapar.
 //
 // Ortam değişkenleriyle özelleştirilebilir:
 //   CDP_PORT (varsayılan 9334), TARGET_URL (varsayılan http://127.0.0.1:8799/index.html)

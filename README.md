@@ -57,6 +57,14 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   Kamış savrulur, şamandıra yay çizerek uçar, misina ve su sıçraması çizilir.
 - 🚗 **Araba** — üret, yere bırak, <kbd>R</kbd> ile bin; tek blokluk basamakları çıkar.
   Tekerlekler döner, öndekiler direksiyonla kırılır; egzoz dumanı ve toz çıkar.
+- 🐟 **Suda yüzen balıklar** — deniz, göl ve kendi kazdığın havuzlarda sürü
+  hâlinde yüzerler; su sütununda kalır, kıyıya çıkmaz, yaklaşınca kaçarlar.
+  Vurulunca balık düşürürler; karaya çıkan balık çırpınıp boğulur.
+- 🏘️ **Köyler ve köylüler** — düz çimenlikte, denize yakın alanlarda 2–5 evli
+  küçük köyler: kütük köşeli, tahta duvarlı, cam pencereli, kapılı ve saçaklı
+  evler, taş patikalar ve ortada kuyu. Her evin kapısında bir köylü yaşar;
+  gündüz evinin çevresinde dolaşır, gece kapısına döner. Evlerin içi ağaçsız
+  ve düzleştirilmiş zemindedir; oyuncu değişiklikleri korunur.
 - 🐑 **Hayvanlar ve yaratıklar** — koyun, domuz, tavuk çimenlerde gezinir
   (durur, yürür); vurulunca koşarak kaçar ve et bırakır. Gece çıkan zombi
   oyuncuyu görünce koşarak kovalar. Mantar Kafa mesafesini korur ve zehir
@@ -71,7 +79,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
   sisi, bakılan bloğun çerçevesi, koşarken genişleyen görüş açısı.
 - ⛏️ **Kırma animasyonu** — basılı tuttukça yayılan çatlak, kırılınca bloğun
   dokusundan renk alan parçacıklar.
-- ✅ **197 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
+- ✅ **227 birim testi** + gerçek Chrome üzerinde başsız uçtan uca test.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -86,7 +94,7 @@ konuşmak için gereken `wasm-bindgen`, `js-sys` ve `web-sys` kütüphaneleridir
 | [Rust](https://rustup.rs/) | stable (2021 edition) | `rustup` ile kurulması önerilir |
 | `wasm32-unknown-unknown` hedefi | — | `rustup target add` ile eklenir |
 | [`wasm-bindgen-cli`](https://github.com/rustwasm/wasm-bindgen) | **0.2.129** | `Cargo.lock` içindeki kütüphane sürümüyle **birebir** eşleşmeli |
-| Bash | — | `build.sh` için (Windows'ta Git Bash / WSL) |
+| Bash | — | `build.sh` için (Windows'ta Git Bash / WSL; macOS ve Linux'ta hazır) |
 | Node.js | isteğe bağlı | Tek dosya paketleyici ve başsız test için |
 | [`wasm-opt`](https://github.com/WebAssembly/binaryen) | isteğe bağlı | PATH'te varsa `build.sh` çıktıyı ≈%30 küçültür |
 
@@ -107,6 +115,30 @@ cd fictional-palm-tree
 
 Ardından tarayıcıda **<http://localhost:8080>** adresini açın ve oyuna
 tıklayarak fareyi kilitleyin.
+
+#### 🍎 macOS
+
+Oyun ve derleme betikleri macOS'ta olduğu gibi çalışır; Windows'a özel hiçbir
+adım yoktur. Tek seferlik kurulum:
+
+```bash
+xcode-select --install                                # derleyici + linker
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129
+
+brew install node python                              # isteğe bağlı: paketleyici + test
+./build.sh                                            # test + derleme + tek dosya
+./build.sh serve 8080                                 # http://localhost:8080
+```
+
+- Apple Silicon'da `wasm-bindgen-cli` kaynaktan derlenir (birkaç dakika sürer).
+- `./tools/smoke.sh` başsız testi de taşınabilir: Chrome'u `/Applications`
+  altında kendisi bulur, portu `lsof` ile bulup yalnızca kendi başlattığı
+  süreçleri kapatır (`CHROME=/yol/Chrome` ile elle de verilebilir).
+- Oyunda hız koşusu <kbd>Control</kbd> tuşundadır (Mac klavyesinde `ctrl`);
+  sağ tık yerine iki parmakla dokunma / `Control`+tıklama da çalışır.
+- `voxelcraft-rs.html` tek dosyalık sürümü Safari dâhil her tarayıcıda açılır.
 
 > [!IMPORTANT]
 > `index.html` dosyasını `file://` üzerinden açmak **çalışmaz**: `.wasm` dosyası

@@ -11,8 +11,11 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+// fileURLToPath hem Windows sürücü harflerini hem de macOS/Linux yollarındaki
+// boşluk ve Türkçe karakterleri (yüzde kodlamasını çözerek) doğru işler.
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const gluePath = path.join(root, 'pkg-nomodules', 'voxelcraft_rs.js');
 const wasmPath = path.join(root, 'pkg-nomodules', 'voxelcraft_rs_bg.wasm');
 const htmlPath = path.join(root, 'index.html');

@@ -26,9 +26,13 @@ use crate::gl::{FrameEffects, Renderer};
 use crate::hud::{DebugInfo, Hud, HudFrame};
 use crate::inventory::{Inventory, Stack, HOTBAR_SIZE, MAX_STACK};
 use crate::mesh::{self, MeshBuffers};
-use crate::mobs::{Kind, MobEvent, Mobs, Sound, POISON_TIME};
+use crate::mobs::{Kind, Mob, MobEvent, Mobs, Sound, POISON_TIME};
 use crate::pacing::QualityGovernor;
 use crate::player::{Player, REACH};
+use crate::protocol::{
+    Connection, Decoder, Direction, Face, Intent, Packet, Position, State as NetState,
+    PROTOCOL_VERSION,
+};
 use crate::raycast::raycast_voxel;
 use crate::sky::{clock_hours, sky_state, DAY_LENGTH, START_TIME};
 use crate::survival::{Event, GameMode, Survival, TickInput};
@@ -62,6 +66,104 @@ const SWIM_SPRINT_SPEED: f64 = 4.0;
 const SWIM_UP: f64 = 3.6;
 /// Hiçbir tuşa basılmazken hedeflenen dikey hız (yavaş batma).
 const SWIM_SINK: f64 = 1.5;
+
+/// Çok oyunculu oturumdaki uzak bir oyuncunun 3B karakter modeli ve durumu.
+struct RemotePlayer {
+    id: i32,
+    name: String,
+    pos: [f64; 3],
+    target_pos: [f64; 3],
+    yaw: f64,
+    target_yaw: f64,
+    pitch: f64,
+    target_pitch: f64,
+    anim: f64,
+    speed: f64,
+    hurt: f64,
+}
+
+impl RemotePlayer {
+    fn animate(&mut self, dt: f64) {
+        self.hurt = (self.hurt - dt * 3.0).max(0.0);
+        let k = (dt * 12.0).min(1.0);
+        let dx = (self.target_pos[0] - self.pos[0]) * k;
+        let dy = (self.target_pos[1] - self.pos[1]) * k;
+        let dz = (self.target_pos[2] - self.pos[2]) * k;
+        let dist = (self.target_pos[0] - self.pos[0]).hypot(self.target_pos[2] - self.pos[2]);
+        if dist > 20.0 {
+            self.pos = self.target_pos;
+        } else {
+            self.pos[0] += dx;
+            self.pos[1] += dy;
+            self.pos[2] += dz;
+        }
+        let moved = dx.hypot(dz);
+        self.anim += moved;
+        self.speed = if dt > 0.0 { moved / dt } else { 0.0 };
+        let dyaw = (self.target_yaw - self.yaw + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        self.yaw += dyaw * k;
+        self.pitch += (self.target_pitch - self.pitch) * k;
+    }
+
+    fn push_boxes(&self, boxes: &mut Vec<BoxInst>) {
+        let p = self.pos;
+        let yaw = self.yaw as f32;
+        let (sin_y, cos_y) = self.yaw.sin_cos();
+        let f = [-sin_y, -cos_y];
+        let right = [-f[1], f[0]];
+        let at = |r: f64, u: f64, fw: f64| {
+            [
+                p[0] + right[0] * r + f[0] * fw,
+                p[1] + u,
+                p[2] + right[1] * r + f[1] * fw,
+            ]
+        };
+        let hurt = self.hurt as f32;
+        let tint = |c: [u8; 3]| -> [u8; 3] {
+            if hurt <= 0.0 {
+                return c;
+            }
+            [
+                (c[0] as f32 * (1.0 - hurt * 0.6) + 255.0 * hurt * 0.6) as u8,
+                (c[1] as f32 * (1.0 - hurt * 0.7)) as u8,
+                (c[2] as f32 * (1.0 - hurt * 0.7)) as u8,
+            ]
+        };
+        let shirts: [[u8; 3]; 6] = [
+            [56, 168, 212],
+            [218, 86, 72],
+            [92, 188, 98],
+            [224, 174, 58],
+            [156, 98, 212],
+            [230, 126, 62],
+        ];
+        let shirt = tint(shirts[(self.id.unsigned_abs() as usize) % shirts.len()]);
+        let skin = tint([232, 188, 152]);
+        let hair = tint([62, 42, 28]);
+        let pants = tint([52, 66, 118]);
+
+        let amp = (self.speed / 3.5).min(1.0) as f32;
+        let swing = (self.anim * 3.8).sin() as f32 * 0.65 * amp;
+
+        // Bacaklar
+        boxes.push(BoxInst { center: at(-0.11, 0.36, 0.0), half: [0.10, 0.36, 0.10], yaw, pitch: swing, color: pants, glow: false });
+        boxes.push(BoxInst { center: at(0.11, 0.36, 0.0), half: [0.10, 0.36, 0.10], yaw, pitch: -swing, color: pants, glow: false });
+        // Gövde
+        boxes.push(BoxInst { center: at(0.0, 1.04, 0.0), half: [0.22, 0.32, 0.12], yaw, pitch: 0.0, color: shirt, glow: false });
+        // Kollar
+        boxes.push(BoxInst { center: at(-0.31, 1.04, 0.0), half: [0.09, 0.32, 0.09], yaw, pitch: -swing, color: shirt, glow: false });
+        boxes.push(BoxInst { center: at(0.31, 1.04, 0.0), half: [0.09, 0.32, 0.09], yaw, pitch: swing, color: shirt, glow: false });
+        // Baş + saç + gözler
+        let head_pitch = (self.pitch as f32).clamp(-0.6, 0.6);
+        boxes.push(BoxInst { center: at(0.0, 1.56, 0.0), half: [0.20, 0.20, 0.20], yaw, pitch: head_pitch, color: skin, glow: false });
+        boxes.push(BoxInst { center: at(0.0, 1.72, 0.0), half: [0.21, 0.06, 0.21], yaw, pitch: head_pitch, color: hair, glow: false });
+        for side in [-1.0, 1.0] {
+            boxes.push(BoxInst { center: at(0.08 * side, 1.57, 0.205), half: [0.035, 0.035, 0.01], yaw, pitch: head_pitch, color: [28, 34, 46], glow: false });
+        }
+    }
+}
 
 struct Game {
     world: World,
@@ -169,6 +271,18 @@ struct Game {
     debug_timer: f64,
     time: f32,
     started: bool,
+
+    // --- Çok oyunculu ağ durumu ---
+    net_conn: Connection,
+    net_decoder: Decoder,
+    net_handshake_sent: bool,
+    my_player_id: i32,
+    net_pos_timer: f64,
+    remote_players: Vec<RemotePlayer>,
+    chat_log: Vec<(String, String)>,
+    chat_seq: u32,
+    nametags: Vec<(String, i32, i32)>,
+    net_label: String,
 }
 
 impl Game {
@@ -289,6 +403,9 @@ impl Game {
             self.data_idx += 1;
             if !self.world.chunks.contains_key(&ckey(cx, cz)) {
                 self.world.generate_chunk(cx, cz);
+                if (cx - pcx).abs() <= 3 && (cz - pcz).abs() <= 3 {
+                    self.torches_dirty = true;
+                }
                 if self.now_ms() - t0 > budget {
                     return;
                 }
@@ -417,8 +534,14 @@ impl Game {
             self.save_farming();
         }
         self.world.set_block_raw(hit.x, hit.y, hit.z, crate::blocks::AIR);
+        let pos = Position { x: hit.x, y: hit.y, z: hit.z };
+        if self.is_multiplayer() && pos.in_range() {
+            self.net_send(&Packet::PlayerAction { pos, block: crate::blocks::AIR as i32 });
+        }
         self.torches_dirty = true;
-        self.remesh_around(hit.x, hit.y, hit.z);
+        if crate::blocks::is_cube(id) {
+            self.remesh_around(hit.x, hit.y, hit.z);
+        }
         self.particles.spawn_break(hit.x, hit.y, hit.z, id, &self.atlas_pixels);
         if let Some(msg) = toast_msg {
             self.hud.toast(msg);
@@ -505,7 +628,15 @@ impl Game {
     /// Bir canlıya hasar verir: geri savrulur, hayvansa kaçmaya başlar.
     fn hit_mob(&mut self, i: usize, damage: i32, at: [f64; 3]) {
         let from = self.player.pos;
+        let net_id = self.mobs.list[i].net_id;
         self.mobs.list[i].damage(damage, from);
+        if self.is_multiplayer() && net_id > 0 {
+            self.net_send(&Packet::InteractEntity {
+                entity_id: net_id,
+                damage,
+                item_id: 0,
+            });
+        }
         for _ in 0..7 {
             self.particles.puff(at, [0.0, 1.5, 0.0], 3.0, [170, 30, 30], 0.35, 0.05, 1.0);
         }
@@ -526,6 +657,17 @@ impl Game {
         if self.torches_dirty {
             self.refresh_torches();
         }
+        // Çok oyunculu oturumda canlılar ve ekinler sunucu tarafından yönetilir;
+        // istemci yalnızca uzak canlıları ve oyuncuları yumuşakça ara değerler.
+        if self.is_multiplayer() {
+            for m in self.mobs.list.iter_mut() {
+                m.animate_remote(dt);
+            }
+            for rp in self.remote_players.iter_mut() {
+                rp.animate(dt);
+            }
+            return;
+        }
         // Ekin büyümesi: olgunlaşan ekinler görsel listeyi ve kaydı yeniler.
         let mut farm_changed = std::mem::take(&mut self.farm_changed);
         self.farming.tick(&mut self.world, dt, &mut farm_changed);
@@ -545,8 +687,8 @@ impl Game {
         let mut save_dirty = false;
         for ev in events.iter() {
             match *ev {
-                MobEvent::Attack(damage) => self.survival.damage(damage, "yaratık"),
-                MobEvent::ArrowHit(damage) => self.survival.damage(damage, "iskelet oku"),
+                MobEvent::Attack(_, damage) => self.survival.damage(damage, "yaratık"),
+                MobEvent::ArrowHit(_, damage) => self.survival.damage(damage, "iskelet oku"),
                 MobEvent::Sound(kind, sound, pos) => {
                     let what = match sound {
                         Sound::Idle => "idle",
@@ -569,14 +711,14 @@ impl Game {
                         self.particles.puff(pos, [0.0, 0.6, 0.0], 2.4, [120, 210, 70], 0.7, 0.08, -0.01);
                     }
                 }
-                MobEvent::Poison => {
+                MobEvent::Poison(_) => {
                     if !self.survival.is_creative() {
                         self.survival.poison_for(POISON_TIME);
                         self.hud.toast("Zehirlendin!");
                         sfx("poison", 1.0);
                     }
                 }
-                MobEvent::Died(kind, pos) => {
+                MobEvent::Died(kind, pos, _) => {
                     save_dirty = true;
                     let stats = kind.stats();
                     for _ in 0..16 {
@@ -652,8 +794,14 @@ impl Game {
             self.particles.spawn_impact(out, normal, id, &self.atlas_pixels);
             if shatters(id) && hit.y > 0 {
                 self.world.set_block_raw(hit.x, hit.y, hit.z, crate::blocks::AIR);
+                let pos = Position { x: hit.x, y: hit.y, z: hit.z };
+                if self.is_multiplayer() && pos.in_range() {
+                    self.net_send(&Packet::PlayerAction { pos, block: crate::blocks::AIR as i32 });
+                }
                 self.torches_dirty = true;
-                self.remesh_around(hit.x, hit.y, hit.z);
+                if crate::blocks::is_cube(id) {
+                    self.remesh_around(hit.x, hit.y, hit.z);
+                }
                 self.particles.spawn_break(hit.x, hit.y, hit.z, id, &self.atlas_pixels);
             }
         }
@@ -691,6 +839,14 @@ impl Game {
         if let Some((i, _)) = self.mobs.ray_hit(eye, d, 3.6).filter(|&(_, t)| t < wall) {
             if self.mobs.feed(i, id) {
                 let pos = self.mobs.list[i].body.pos;
+                let net_id = self.mobs.list[i].net_id;
+                if self.is_multiplayer() && net_id > 0 {
+                    self.net_send(&Packet::InteractEntity {
+                        entity_id: net_id,
+                        damage: 0,
+                        item_id: id as i32,
+                    });
+                }
                 if !self.survival.is_creative() {
                     self.inv.consume_selected();
                 }
@@ -707,6 +863,11 @@ impl Game {
         if id == HOE {
             if let Some(hit) = self.target() {
                 if Farming::till(&mut self.world, hit.x, hit.y, hit.z) {
+                    let pos = Position { x: hit.x, y: hit.y, z: hit.z };
+                    let face = Face::from_normal(hit.nx, hit.ny, hit.nz).unwrap_or(Face::Top);
+                    if self.is_multiplayer() && pos.in_range() {
+                        self.net_send(&Packet::UseItemOn { pos, face, item_id: HOE as i32 });
+                    }
                     self.torches_dirty = true;
                     self.remesh_around(hit.x, hit.y, hit.z);
                     self.particles.spawn_break(hit.x, hit.y, hit.z, FARMLAND, &self.atlas_pixels);
@@ -721,6 +882,14 @@ impl Game {
         if id == SEEDS {
             if let Some(hit) = self.target() {
                 if self.farming.plant_seeds(&mut self.world, hit.x, hit.y, hit.z) {
+                    let pos = Position { x: hit.x, y: hit.y, z: hit.z };
+                    if self.is_multiplayer() && pos.in_range() {
+                        self.net_send(&Packet::UseItemOn {
+                            pos,
+                            face: Face::Top,
+                            item_id: SEEDS as i32,
+                        });
+                    }
                     if !self.survival.is_creative() {
                         self.inv.consume_selected();
                     }
@@ -737,6 +906,11 @@ impl Game {
         if id == BONE {
             if let Some(hit) = self.target() {
                 if let Some([cx, cy, cz]) = self.farming.fertilize(&mut self.world, hit.x, hit.y, hit.z) {
+                    let pos = Position { x: hit.x, y: hit.y, z: hit.z };
+                    let face = Face::from_normal(hit.nx, hit.ny, hit.nz).unwrap_or(Face::Top);
+                    if self.is_multiplayer() && pos.in_range() {
+                        self.net_send(&Packet::UseItemOn { pos, face, item_id: BONE as i32 });
+                    }
                     if !self.survival.is_creative() {
                         self.inv.consume_selected();
                     }
@@ -789,13 +963,9 @@ impl Game {
                 }
                 if dx.abs() <= 3 && dz.abs() <= 3 {
                     let Some(ch) = self.world.chunks.get(&ckey(cx, cz)) else { continue };
-                    for (idx, &b) in ch.data.iter().enumerate() {
-                        if is_plant(b) {
-                            let x = cx * CHUNK_SIZE + (idx % size) as i32;
-                            let z = cz * CHUNK_SIZE + (idx / size % size) as i32;
-                            let y = (idx / (size * size)) as i32;
-                            self.plants.push(([x, y, z], b));
-                        }
+                    let (x0, z0) = (cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+                    for &(local, b) in &ch.plants {
+                        self.plants.push(([x0 + local[0] as i32, local[1] as i32, z0 + local[2] as i32], b));
                     }
                 }
             }
@@ -1184,6 +1354,18 @@ impl Game {
             m.push_boxes(&mut boxes);
         }
 
+        // Çok oyunculu oturumdaki diğer oyuncuların 3B modelleri.
+        for rp in self.remote_players.iter() {
+            let p = rp.pos;
+            if (p[0] - cam[0]).powi(2) + (p[2] - cam[2]).powi(2) > 96.0 * 96.0 {
+                continue;
+            }
+            let r = rel(p);
+            if frustum.aabb_visible([r[0] - 0.6, r[1] - 0.1, r[2] - 0.6], [r[0] + 0.6, r[1] + 2.0, r[2] + 0.6]) {
+                rp.push_boxes(&mut boxes);
+            }
+        }
+
         // Zehir tükürükleri ve iskelet okları.
         for s in self.mobs.spits.iter() {
             let r = rel(s.pos);
@@ -1289,8 +1471,14 @@ impl Game {
         if !self.world.set_block_raw(tx, ty, tz, placeable) {
             return;
         }
+        let pos = Position { x: tx, y: ty, z: tz };
+        if self.is_multiplayer() && pos.in_range() {
+            self.net_send(&Packet::PlayerAction { pos, block: placeable as i32 });
+        }
         self.torches_dirty = true;
-        self.remesh_around(tx, ty, tz);
+        if crate::blocks::is_cube(placeable) || existing == crate::blocks::WATER {
+            self.remesh_around(tx, ty, tz);
+        }
 
         if !self.survival.is_creative() {
             self.inv.consume_selected();
@@ -1397,6 +1585,290 @@ impl Game {
     }
 
     // ---------------------------------------------------------------
+    // Çok oyunculu ağ (Minecraft protokolü durum makinesi)
+    // ---------------------------------------------------------------
+
+    fn is_multiplayer(&self) -> bool {
+        self.net_conn.state == NetState::Play && ws_state() == 1
+    }
+
+    fn net_send(&mut self, pkt: &Packet) {
+        if ws_state() != 1 {
+            return;
+        }
+        let _ = self.net_conn.handle(pkt);
+        if let Ok(bytes) = pkt.encode(None) {
+            ws_send(&bytes);
+        }
+    }
+
+    fn poll_network(&mut self, dt: f64) {
+        // Yerel veya çok oyunculu sohbet kutusundan gönderilen ileti
+        let chat_in = take_chat_input();
+        if !chat_in.is_empty() {
+            let trimmed = chat_in.trim().to_string();
+            if !trimmed.is_empty() {
+                if self.is_multiplayer() {
+                    self.net_send(&Packet::ChatMessage { message: trimmed });
+                } else {
+                    let name = player_name();
+                    let sender = if name.is_empty() { "Sen".to_string() } else { name };
+                    self.push_chat(sender, trimmed);
+                }
+            }
+        }
+
+        let state = ws_state();
+        if state == 1 && !self.net_handshake_sent {
+            self.net_conn = Connection::default();
+            self.net_decoder = Decoder::default();
+            self.net_handshake_sent = true;
+            let raw_name = player_name();
+            let clean: String = raw_name.chars().filter(|c| !c.is_control()).take(16).collect();
+            let name = if clean.is_empty() { "Oyuncu".to_string() } else { clean };
+            self.net_send(&Packet::Handshake {
+                protocol: PROTOCOL_VERSION,
+                address: "localhost".into(),
+                port: 8080,
+                intent: Intent::Login,
+            });
+            self.net_send(&Packet::LoginStart { name });
+            self.net_label = "Bağlanıyor...".to_string();
+        } else if state != 1 && self.net_handshake_sent {
+            self.net_handshake_sent = false;
+            self.net_conn = Connection::default();
+            self.net_decoder = Decoder::default();
+            self.remote_players.clear();
+            self.net_label = "Tek Oyunculu".to_string();
+            self.hud.toast("Sunucu bağlantısı kesildi — Tek Oyunculu");
+        }
+
+        if state != 1 {
+            return;
+        }
+
+        let incoming = ws_drain();
+        if !incoming.is_empty() {
+            self.net_decoder.push(&incoming);
+        }
+
+        let mut packets = Vec::new();
+        while let Ok(Some((id, body))) = self.net_decoder.next_packet() {
+            if let Ok(pkt) = Packet::decode(self.net_conn.state, Direction::Clientbound, id, &body) {
+                let _ = self.net_conn.handle(&pkt);
+                packets.push(pkt);
+            } else {
+                break;
+            }
+        }
+
+        for pkt in packets {
+            match pkt {
+                Packet::LoginSuccess { name } => {
+                    self.net_send(&Packet::LoginAcknowledged);
+                    self.hud.toast(format!("Sunucuya giriş yapıldı: {name}"));
+                }
+                Packet::FinishConfiguration => {
+                    self.net_send(&Packet::AcknowledgeFinishConfiguration);
+                }
+                Packet::JoinGame { player_id, seed, day_time } => {
+                    self.my_player_id = player_id;
+                    self.day_time = day_time as f64;
+                    if self.world.seed != seed {
+                        let old_keys: Vec<u64> = self.world.chunks.keys().copied().collect();
+                        for k in old_keys {
+                            self.renderer.remove_chunk(k);
+                        }
+                        self.world = World::new(seed);
+                        let spawn = self.world.find_spawn();
+                        self.player.pos = spawn;
+                        self.player.vel = [0.0; 3];
+                        self.force_restream = true;
+                        self.torches_dirty = true;
+                    }
+                    self.mobs.list.clear();
+                    self.remote_players.clear();
+                    self.update_net_label();
+                }
+                Packet::BlockUpdate { pos, block } => {
+                    let b = block.clamp(0, 255) as u8;
+                    self.world
+                        .ensure_chunk(pos.x.div_euclid(CHUNK_SIZE), pos.z.div_euclid(CHUNK_SIZE));
+                    let prev = self.world.get_block(pos.x, pos.y, pos.z);
+                    if prev != b {
+                        self.world.set_block_raw(pos.x, pos.y, pos.z, b);
+                        self.torches_dirty = true;
+                        if crate::blocks::is_cube(b) || crate::blocks::is_cube(prev) {
+                            self.remesh_around(pos.x, pos.y, pos.z);
+                        }
+                    }
+                }
+                Packet::SpawnPlayer { player_id, name, x, y, z, yaw, pitch } => {
+                    if player_id == self.my_player_id {
+                        continue;
+                    }
+                    let y_rad = yaw.to_radians();
+                    let p_rad = pitch.to_radians();
+                    if let Some(rp) = self.remote_players.iter_mut().find(|p| p.id == player_id) {
+                        rp.name = name;
+                        rp.target_pos = [x, y, z];
+                        rp.target_yaw = y_rad;
+                        rp.target_pitch = p_rad;
+                    } else {
+                        self.remote_players.push(RemotePlayer {
+                            id: player_id,
+                            name,
+                            pos: [x, y, z],
+                            target_pos: [x, y, z],
+                            yaw: y_rad,
+                            target_yaw: y_rad,
+                            pitch: p_rad,
+                            target_pitch: p_rad,
+                            anim: 0.0,
+                            speed: 0.0,
+                            hurt: 0.0,
+                        });
+                    }
+                    self.update_net_label();
+                }
+                Packet::SpawnEntity { entity_id, kind, x, y, z, yaw, .. } => {
+                    if let Some(k) = Kind::from_identifier(&kind) {
+                        let y_rad = yaw.to_radians();
+                        if let Some(m) = self.mobs.list.iter_mut().find(|m| m.net_id == entity_id) {
+                            m.net_target = Some(([x, y, z], y_rad));
+                        } else {
+                            let mut m = Mob::new(k, [x, y, z], y_rad);
+                            m.net_id = entity_id;
+                            m.net_target = Some(([x, y, z], y_rad));
+                            self.mobs.list.push(m);
+                        }
+                    }
+                }
+                Packet::MoveEntity { entity_id, x, y, z, yaw, pitch, hurt } => {
+                    let y_rad = yaw.to_radians();
+                    let p_rad = pitch.to_radians();
+                    if let Some(rp) = self.remote_players.iter_mut().find(|p| p.id == entity_id) {
+                        rp.target_pos = [x, y, z];
+                        rp.target_yaw = y_rad;
+                        rp.target_pitch = p_rad;
+                        if hurt {
+                            rp.hurt = 1.0;
+                        }
+                    } else if let Some(m) = self.mobs.list.iter_mut().find(|m| m.net_id == entity_id) {
+                        m.net_target = Some(([x, y, z], y_rad));
+                        let hurt_sound = if hurt {
+                            m.hurt = 1.0;
+                            Some((m.kind.key(), m.body.pos))
+                        } else {
+                            None
+                        };
+                        if let Some((key, pos)) = hurt_sound {
+                            self.play_at(&format!("{key}_hurt"), pos);
+                        }
+                    }
+                }
+                Packet::RemoveEntities { entity_ids } => {
+                    let before_rp = self.remote_players.len();
+                    self.remote_players.retain(|p| !entity_ids.contains(&p.id));
+                    if self.remote_players.len() != before_rp {
+                        self.update_net_label();
+                    }
+                    let my_pos = self.player.pos;
+                    let mut drops = Vec::new();
+                    self.mobs.list.retain(|m| {
+                        if entity_ids.contains(&m.net_id) {
+                            let stats = m.kind.stats();
+                            let p = m.body.pos;
+                            let d = (p[0] - my_pos[0]).hypot(p[2] - my_pos[2]);
+                            if d < 12.0 {
+                                drops.push((m.kind, p, stats.color, stats.height, stats.drop));
+                            }
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for (_kind, pos, color, h, drop) in drops {
+                        for _ in 0..14 {
+                            self.particles.puff(
+                                [pos[0], pos[1] + h * 0.5, pos[2]],
+                                [0.0, 2.0, 0.0],
+                                3.5,
+                                color,
+                                0.6,
+                                0.08,
+                                0.6,
+                            );
+                        }
+                        if let Some((item, count)) = drop {
+                            if !self.survival.is_creative() {
+                                let left = self.inv.add(item, count);
+                                if left < count {
+                                    let gained = count - left;
+                                    self.hud.toast(format!("+{} ×{}", item_name(item), gained));
+                                }
+                            }
+                        }
+                    }
+                }
+                Packet::SystemChat { sender, message } => {
+                    self.push_chat(sender, message);
+                }
+                Packet::EntityDamage { target_player, damage, poison } => {
+                    if target_player == self.my_player_id {
+                        if poison {
+                            if !self.survival.is_creative() {
+                                self.survival.poison_for(POISON_TIME);
+                                self.hud.toast("Zehirlendin!");
+                                sfx("poison", 1.0);
+                            }
+                        } else {
+                            self.survival.damage(damage, "yaratık");
+                        }
+                    }
+                }
+                Packet::KeepAliveClientbound { id } => {
+                    self.net_send(&Packet::KeepAliveServerbound { id });
+                }
+                _ => {}
+            }
+        }
+
+        if self.is_multiplayer() {
+            self.net_pos_timer -= dt;
+            if self.net_pos_timer <= 0.0 {
+                self.net_pos_timer = 0.05;
+                let p = self.player.pos;
+                self.net_send(&Packet::PlayerPosition {
+                    x: p[0],
+                    y: p[1],
+                    z: p[2],
+                    yaw: self.player.yaw as f32,
+                    pitch: self.player.pitch as f32,
+                    on_ground: self.player.on_ground,
+                });
+            }
+        }
+    }
+
+    fn update_net_label(&mut self) {
+        if self.is_multiplayer() {
+            let total = 1 + self.remote_players.len();
+            self.net_label = format!("Çevrimiçi ({total} oyuncu)");
+        } else {
+            self.net_label = "Tek Oyunculu".to_string();
+        }
+    }
+
+    fn push_chat(&mut self, sender: String, message: String) {
+        self.chat_log.push((sender, message));
+        if self.chat_log.len() > 24 {
+            self.chat_log.remove(0);
+        }
+        self.chat_seq = self.chat_seq.wrapping_add(1);
+    }
+
+    // ---------------------------------------------------------------
     // Kare
     // ---------------------------------------------------------------
 
@@ -1434,6 +1906,7 @@ impl Game {
         if self.started {
             self.day_time = (self.day_time + dt / DAY_LENGTH).rem_euclid(1.0);
         }
+        self.poll_network(dt);
         self.update_chunks();
         self.update_player(dt);
         self.update_parked_cars(dt);
@@ -1514,7 +1987,7 @@ impl Game {
             return;
         }
 
-        let active = !self.inv_open && !self.survival.dead;
+        let active = !self.inv_open && !self.survival.dead && !chat_box_open();
         let k = |c: &str| active && *self.keys.get(c).unwrap_or(&false);
 
         let (fwd, right) = self.player.basis();
@@ -1715,6 +2188,29 @@ impl Game {
             },
         );
 
+        // Uzak oyuncuların ekran üzerindeki isim etiketlerini (nametag) hesapla
+        self.nametags.clear();
+        for rp in &self.remote_players {
+            let rx = (rp.pos[0] - cam[0]) as f32;
+            let ry = (rp.pos[1] + 2.05 - cam[1]) as f32;
+            let rz = (rp.pos[2] - cam[2]) as f32;
+            if rx * rx + rz * rz > 64.0 * 64.0 {
+                continue;
+            }
+            let cx = view_proj[0] * rx + view_proj[4] * ry + view_proj[8] * rz + view_proj[12];
+            let cy = view_proj[1] * rx + view_proj[5] * ry + view_proj[9] * rz + view_proj[13];
+            let cw = view_proj[3] * rx + view_proj[7] * ry + view_proj[11] * rz + view_proj[15];
+            if cw > 0.1 {
+                let ndc_x = cx / cw;
+                let ndc_y = cy / cw;
+                if (-1.05..=1.05).contains(&ndc_x) && (-1.05..=1.05).contains(&ndc_y) {
+                    let sx = ((ndc_x as f64 * 0.5 + 0.5) * w).round() as i32;
+                    let sy = ((0.5 - ndc_y as f64 * 0.5) * h).round() as i32;
+                    self.nametags.push((rp.name.clone(), sx, sy));
+                }
+            }
+        }
+
         self.hud.draw(&HudFrame {
             inv_open: self.inv_open,
             hud_visible: self.hud_visible,
@@ -1726,6 +2222,10 @@ impl Game {
             held: self.held,
             mouse: self.mouse,
             debug: self.debug,
+            net_label: &self.net_label,
+            chat: &self.chat_log,
+            chat_seq: self.chat_seq,
+            nametags: &self.nametags,
         });
     }
 
@@ -1734,6 +2234,9 @@ impl Game {
     // ---------------------------------------------------------------
 
     fn on_key_down(&mut self, e: &KeyboardEvent) {
+        if chat_box_open() {
+            return;
+        }
         let code = e.code();
 
         // Koşma tuşu Ctrl olduğu için oyun tuşları tarayıcı kısayollarına
@@ -1804,6 +2307,15 @@ impl Game {
             "BracketLeft" | "Minus" => self.set_render_dist(self.render_dist - 1),
             "KeyH" => self.hud_visible = !self.hud_visible,
             "KeyR" => self.toggle_drive(),
+            "KeyT" => {
+                e.prevent_default();
+                self.keys.clear();
+                self.stop_mining();
+                if self.document.pointer_lock_element().is_some() {
+                    let _ = self.document.exit_pointer_lock();
+                }
+                open_chat_box();
+            }
             _ => {}
         }
     }
@@ -1812,21 +2324,39 @@ impl Game {
         self.keys.insert(e.code(), false);
     }
 
+    fn overlay_open(&self) -> bool {
+        self.document
+            .get_element_by_id("overlay")
+            .is_some_and(|el| !el.class_list().contains("hide"))
+    }
+
     fn on_mouse_move(&mut self, e: &MouseEvent) {
-        self.mouse = (e.client_x() as f64, e.client_y() as f64);
-        if self.inv_open {
+        self.pointer_locked = self.document.pointer_lock_element().is_some();
+        let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
+        let prev = self.last_mouse;
+        self.mouse = (cx, cy);
+        self.last_mouse = (cx, cy);
+        if self.inv_open || !self.started || self.overlay_open() {
             return;
         }
+        // Fare kilitliyse tarayıcının bağıl hareketini, kilit henüz
+        // verilmediyse (ör. E ile envanteri kapattıktan hemen sonra ya da
+        // ESC bekleme süresindeyken) imleç farkını kullanır; böylece kamera
+        // hiçbir zaman donmaz. Anormal sıçramalar (±160 px üstü) kırpılır.
         let (dx, dy) = if self.pointer_locked {
-            (e.movement_x() as f64, e.movement_y() as f64)
-        } else if self.dragging {
-            let dx = e.client_x() as f64 - self.last_mouse.0;
-            let dy = e.client_y() as f64 - self.last_mouse.1;
-            self.last_mouse = (e.client_x() as f64, e.client_y() as f64);
-            self.drag_moved += dx.abs() + dy.abs();
-            (dx, dy)
+            (
+                (e.movement_x() as f64).clamp(-160.0, 160.0),
+                (e.movement_y() as f64).clamp(-160.0, 160.0),
+            )
+        } else if prev == (0.0, 0.0) {
+            (0.0, 0.0)
         } else {
-            return;
+            let dx = (cx - prev.0).clamp(-160.0, 160.0);
+            let dy = (cy - prev.1).clamp(-160.0, 160.0);
+            if self.dragging {
+                self.drag_moved += dx.abs() + dy.abs();
+            }
+            (dx, dy)
         };
         // Dürbünde görüş açısı daraldığı kadar fare de yavaşlar.
         let sens = SENSITIVITY * self.gun.fov_scale(self.held_weapon()) as f64;
@@ -1837,20 +2367,28 @@ impl Game {
     }
 
     fn on_mouse_down(&mut self, e: &MouseEvent) {
+        self.pointer_locked = self.document.pointer_lock_element().is_some();
         let button = e.button();
+        let (mx, my) = (e.client_x() as f64, e.client_y() as f64);
+        self.mouse = (mx, my);
+        self.last_mouse = (mx, my);
         if self.inv_open {
-            let (mx, my) = (e.client_x() as f64, e.client_y() as f64);
             self.inventory_click(mx, my, button == 2);
             return;
         }
-        if !self.pointer_locked {
-            if self.started {
-                self.dragging = true;
-                self.drag_button = button;
-                self.drag_moved = 0.0;
-                self.last_mouse = (e.client_x() as f64, e.client_y() as f64);
-            }
+        if !self.started || self.overlay_open() {
             return;
+        }
+        if !self.pointer_locked {
+            // Oyun ekranına tıklandığında fare kilidini hemen yeniden iste
+            // (envanter E ile kapatıldığında veya ESC sonrası ilk tıklamada
+            // kilidin geri gelmesini garanti eder).
+            if let Some(el) = self.document.get_element_by_id("gl") {
+                request_pointer_lock(&el);
+            }
+            self.dragging = true;
+            self.drag_button = button;
+            self.drag_moved = 0.0;
         }
         if button == 0 {
             self.start_mining();
@@ -1861,6 +2399,7 @@ impl Game {
     }
 
     fn on_mouse_up(&mut self, e: &MouseEvent) {
+        self.pointer_locked = self.document.pointer_lock_element().is_some();
         if e.button() == 0 {
             self.stop_mining();
         }
@@ -1868,13 +2407,6 @@ impl Game {
             self.aim_held = false;
         }
         if !self.pointer_locked && self.dragging {
-            if self.drag_moved < 6.0 {
-                if self.drag_button == 0 {
-                    self.break_block();
-                } else if self.drag_button == 2 {
-                    self.right_click();
-                }
-            }
             self.dragging = false;
             self.drag_button = -1;
         }
@@ -1894,6 +2426,7 @@ impl Game {
             return;
         }
         self.inv_open = true;
+        self.pointer_locked = false;
         self.stop_mining();
         self.keys.clear();
         self.dragging = false;
@@ -1911,6 +2444,7 @@ impl Game {
             self.held = if left > 0 { Some(Stack::new(h.id, left as u8)) } else { None };
         }
         self.inv_open = false;
+        self.last_mouse = self.mouse;
         if let Some(el) = self.document.get_element_by_id("gl") {
             request_pointer_lock(&el);
         }
@@ -2042,6 +2576,34 @@ extern "C" {
     /// `index.html` içinde tanımlı: tarayıcıda kayıtlı tarım ekinlerini okur.
     #[wasm_bindgen(js_name = __loadFarming)]
     fn load_farming_storage() -> Vec<u8>;
+
+    /// WebSocket bağlantı durumu (`0: bağlı değil`, `1: bağlı`).
+    #[wasm_bindgen(js_name = __wsState)]
+    fn ws_state() -> i32;
+
+    /// WebSocket üzerinden ikili paket gönderir.
+    #[wasm_bindgen(js_name = __wsSend)]
+    fn ws_send(bytes: &[u8]);
+
+    /// WebSocket'ten gelen ikili baytları boşaltıp döndürür.
+    #[wasm_bindgen(js_name = __wsDrain)]
+    fn ws_drain() -> Vec<u8>;
+
+    /// Oyuncunun girdiği kullanıcı adını döndürür.
+    #[wasm_bindgen(js_name = __playerName)]
+    fn player_name() -> String;
+
+    /// Sohbet giriş kutusu şu an açık mı?
+    #[wasm_bindgen(js_name = __chatOpen)]
+    fn chat_box_open() -> bool;
+
+    /// Sohbet giriş kutusunu açar ve odaklanır (`T` tuşu).
+    #[wasm_bindgen(js_name = __openChat)]
+    fn open_chat_box();
+
+    /// Gönderilmeyi bekleyen sohbet iletisini alıp temizler.
+    #[wasm_bindgen(js_name = __takeChatInput)]
+    fn take_chat_input() -> String;
 }
 
 /// Fare kilidini güvenli biçimde ister (yakalanmamış Promise hatası üretmez).
@@ -2245,7 +2807,9 @@ pub fn debug_spawn_mob(kind: u8) {
             Kind::Cow,
             Kind::Spider,
             Kind::Skeleton,
-        ][kind as usize % 8];
+            Kind::Fish,
+            Kind::Villager,
+        ][kind as usize % 10];
         let (f, _) = g.player.basis();
         let p = g.player.pos;
         g.mobs.spawn(kind, [p[0] + f[0] * 4.0, p[1] + 1.2, p[2] + f[1] * 4.0]);
@@ -2390,8 +2954,14 @@ fn resize_canvases(game: &mut Game) {
                 // 3B tuval uyarlanabilir çözünürlükte çizilir, CSS ile
                 // pencereye gerilir; arayüz her zaman tam çözünürlüktedir.
                 let s = if id == "gl" { game.render_scale as f64 } else { 1.0 };
-                c.set_width(((w * s) as u32).max(1));
-                c.set_height(((h * s) as u32).max(1));
+                let tw = ((w * s) as u32).max(1);
+                let th = ((h * s) as u32).max(1);
+                if c.width() != tw {
+                    c.set_width(tw);
+                }
+                if c.height() != th {
+                    c.set_height(th);
+                }
             }
         }
     }
@@ -2523,6 +3093,16 @@ pub fn start() -> Result<(), JsValue> {
         started: false,
         moved_dist: 0.0,
         sprinting: false,
+        net_conn: Connection::default(),
+        net_decoder: Decoder::default(),
+        net_handshake_sent: false,
+        my_player_id: 0,
+        net_pos_timer: 0.0,
+        remote_players: Vec::new(),
+        chat_log: Vec::new(),
+        chat_seq: 0,
+        nametags: Vec::new(),
+        net_label: "Tek Oyunculu".to_string(),
     };
 
     let saved_mobs = load_mobs_storage();
@@ -2545,11 +3125,14 @@ pub fn start() -> Result<(), JsValue> {
     let game = Rc::new(RefCell::new(game));
     GAME.with(|slot| *slot.borrow_mut() = Some(game.clone()));
 
-    // --- olay dinleyicileri ---
+    // --- olay dinleyicileri (tümü `try_borrow_mut` kullanır ki iç içe
+    //     tetiklenen tarayıcı olayları RefCell paniğiyle WASM'ı kilitlemesin) ---
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
-            g.borrow_mut().on_key_down(&e);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.on_key_down(&e);
+            }
         });
         window.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2557,7 +3140,9 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
-            g.borrow_mut().on_key_up(&e);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.on_key_up(&e);
+            }
         });
         window.add_event_listener_with_callback("keyup", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2565,7 +3150,9 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
-            g.borrow_mut().on_mouse_move(&e);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.on_mouse_move(&e);
+            }
         });
         window.add_event_listener_with_callback("mousemove", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2573,7 +3160,9 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
-            g.borrow_mut().on_mouse_down(&e);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.on_mouse_down(&e);
+            }
         });
         window.add_event_listener_with_callback("mousedown", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2581,7 +3170,9 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
-            g.borrow_mut().on_mouse_up(&e);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.on_mouse_up(&e);
+            }
         });
         window.add_event_listener_with_callback("mouseup", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2589,7 +3180,9 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(WheelEvent)>::new(move |e: WheelEvent| {
-            g.borrow_mut().on_wheel(&e);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                game.on_wheel(&e);
+            }
         });
         window.add_event_listener_with_callback("wheel", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2597,8 +3190,9 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
-            let mut game = g.borrow_mut();
-            resize_canvases(&mut game);
+            if let Ok(mut game) = g.try_borrow_mut() {
+                resize_canvases(&mut game);
+            }
         });
         window.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -2623,12 +3217,8 @@ pub fn start() -> Result<(), JsValue> {
     {
         let g = game.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
-            let locked = g
-                .borrow()
-                .document
-                .pointer_lock_element()
-                .is_some();
-            let mut game = g.borrow_mut();
+            let Ok(mut game) = g.try_borrow_mut() else { return };
+            let locked = game.document.pointer_lock_element().is_some();
             game.pointer_locked = locked;
             if !locked {
                 game.stop_mining();
@@ -2638,7 +3228,7 @@ pub fn start() -> Result<(), JsValue> {
             if let Some(el) = game.document.get_element_by_id("overlay") {
                 if locked {
                     let _ = el.class_list().add_1("hide");
-                } else if !game.inv_open {
+                } else if !game.inv_open && !chat_box_open() {
                     let _ = el.class_list().remove_1("hide");
                 }
             }
@@ -2647,24 +3237,28 @@ pub fn start() -> Result<(), JsValue> {
         cb.forget();
     }
     {
-        // Başlat düğmesi
+        // Başlat düğmesi ve duraklatma kaplaması (herhangi bir yerine tıklamak oyuna döndürür)
         let g = game.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
-            let g2 = g.borrow();
-            if let Some(el) = g2.document.get_element_by_id("gl") {
+            let Ok(mut game) = g.try_borrow_mut() else { return };
+            if let Some(el) = game.document.get_element_by_id("gl") {
                 request_pointer_lock(&el);
             }
-            drop(g2);
-            let mut game = g.borrow_mut();
+            let first_start = !game.started;
             game.started = true;
             game.last_time = game.now_ms();
             if let Some(el) = game.document.get_element_by_id("overlay") {
                 let _ = el.class_list().add_1("hide");
             }
-            game.hud.toast("Hayatta Kalma — G ile Yaratıcı moda geç");
+            if first_start {
+                game.hud.toast("Hayatta Kalma — G ile Yaratıcı moda geç");
+            }
         });
         if let Some(btn) = document.get_element_by_id("startBtn") {
             btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
+        }
+        if let Some(ov) = document.get_element_by_id("overlay") {
+            ov.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
         }
         cb.forget();
     }
@@ -2678,8 +3272,9 @@ pub fn start() -> Result<(), JsValue> {
 
     // --- ilk boyutlandırma ---
     {
-        let mut g = game.borrow_mut();
-        resize_canvases(&mut g);
+        if let Ok(mut g) = game.try_borrow_mut() {
+            resize_canvases(&mut g);
+        }
     }
 
     // --- oyun döngüsü ---
@@ -2689,8 +3284,7 @@ pub fn start() -> Result<(), JsValue> {
         let g = game.clone();
         let win = window.clone();
         *slot.borrow_mut() = Some(Closure::<dyn FnMut(f64)>::new(move |t: f64| {
-            {
-                let mut game = g.borrow_mut();
+            if let Ok(mut game) = g.try_borrow_mut() {
                 game.frame(t);
             }
             if let Some(cb) = slot2.borrow().as_ref() {

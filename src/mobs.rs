@@ -15,8 +15,8 @@
 //! büyür. Her canlı ara sıra ses çıkarır (olay olarak bildirilir).
 
 use crate::blocks::{
-    is_liquid, is_plant, is_solid, AIR, APPLE, BONE, GRASS, LEAVES, MEAT, MUSHROOM, SEEDS, TORCH,
-    WATER, WHEAT,
+    is_liquid, is_plant, is_solid, AIR, APPLE, BONE, BREAD, FISH, GRASS, LEAVES, MEAT, MUSHROOM,
+    SEEDS, TORCH, WATER, WHEAT,
 };
 use crate::player::{Player, GRAVITY};
 use crate::protocol::{Error, Reader, Result as ProtoResult, Writer};
@@ -32,6 +32,11 @@ pub enum Kind {
     Cow,
     Spider,
     Skeleton,
+    /// Suda yaşayan balık: yüzer, karada çırpınıp boğulur, oyuncudan kaçar.
+    Fish,
+    /// Köy evlerinde yaşayan köylü: gündüz evinin çevresinde dolaşır, gece
+    /// kapısına döner. Saldırgan değildir.
+    Villager,
 }
 
 /// Canlının çıkardığı ses türü.
@@ -79,11 +84,32 @@ impl Kind {
             Kind::Shroom => Stats { name: "Mantar Kafa", radius: 0.32, height: 1.3, health: 14, walk: 1.2, run: 3.2, drop: Some((MUSHROOM, 1)), color: [200, 44, 40] },
             Kind::Spider => Stats { name: "Örümcek", radius: 0.48, height: 0.85, health: 16, walk: 2.0, run: 4.0, drop: Some((SEEDS, 2)), color: [52, 46, 56] },
             Kind::Skeleton => Stats { name: "İskelet", radius: 0.3, height: 1.85, health: 16, walk: 1.5, run: 3.0, drop: Some((BONE, 2)), color: [224, 220, 208] },
+            Kind::Fish => Stats { name: "Balık", radius: 0.18, height: 0.34, health: 3, walk: 1.5, run: 3.2, drop: Some((FISH, 1)), color: [232, 148, 72] },
+            Kind::Villager => Stats { name: "Köylü", radius: 0.3, height: 1.8, health: 14, walk: 1.15, run: 3.4, drop: Some((BREAD, 1)), color: [138, 102, 72] },
         }
     }
 
     pub fn hostile(self) -> bool {
         matches!(self, Kind::Zombie | Kind::Shroom | Kind::Spider | Kind::Skeleton)
+    }
+
+    /// Kendiliğinden (gece/gündüz döngüsüyle) doğan tür mü? Balık suda, köylü
+    /// evinde doğar; ikisi de yabani hayvan sayımına ve üremeye girmez.
+    pub fn wild(self) -> bool {
+        !matches!(self, Kind::Fish | Kind::Villager)
+    }
+
+    pub fn is_fish(self) -> bool {
+        self == Kind::Fish
+    }
+
+    pub fn is_villager(self) -> bool {
+        self == Kind::Villager
+    }
+
+    /// Yemle çiftleşen hayvan mı? (Balık ve köylü bu listeye girmez.)
+    pub fn breedable(self) -> bool {
+        matches!(self, Kind::Sheep | Kind::Pig | Kind::Chicken | Kind::Cow)
     }
 
     /// Hayvanın sevdiği yem mi? (Elde tutulunca takip eder, sağ tıklanınca çiftleşir.)
@@ -107,6 +133,8 @@ impl Kind {
             Kind::Shroom => "shroom",
             Kind::Spider => "spider",
             Kind::Skeleton => "skeleton",
+            Kind::Fish => "fish",
+            Kind::Villager => "villager",
         }
     }
 
@@ -121,6 +149,8 @@ impl Kind {
             Kind::Shroom => "voxelcraft:shroom",
             Kind::Spider => "minecraft:spider",
             Kind::Skeleton => "minecraft:skeleton",
+            Kind::Fish => "minecraft:cod",
+            Kind::Villager => "minecraft:villager",
         }
     }
 
@@ -134,6 +164,8 @@ impl Kind {
             Kind::Shroom,
             Kind::Spider,
             Kind::Skeleton,
+            Kind::Fish,
+            Kind::Villager,
         ]
         .into_iter()
         .find(|k| k.identifier() == s)
@@ -149,6 +181,8 @@ impl Kind {
             Kind::Cow => 5,
             Kind::Spider => 6,
             Kind::Skeleton => 7,
+            Kind::Fish => 8,
+            Kind::Villager => 9,
         }
     }
 
@@ -162,6 +196,8 @@ impl Kind {
             5 => Kind::Cow,
             6 => Kind::Spider,
             7 => Kind::Skeleton,
+            8 => Kind::Fish,
+            9 => Kind::Villager,
             _ => return None,
         })
     }
@@ -180,6 +216,11 @@ const MAX_ANIMALS: usize = 8;
 const MAX_ZOMBIES: usize = 4;
 const BREED_MAX_ANIMALS: usize = 14;
 const BREED_MAX_HOSTILE: usize = 6;
+/// Suda yüzen balık ve köy evlerinde yaşayan köylü sınırları.
+const MAX_FISH: usize = 12;
+const MAX_VILLAGERS: usize = 8;
+/// Balığın karada boğulmadan önce çırpındığı süre (saniye).
+const FISH_BREATH: f64 = 5.0;
 /// Eş arama ve çiftleşme mesafeleri.
 const LURE_RANGE: f64 = 16.0;
 const BREED_RANGE: f64 = 2.6;
@@ -241,6 +282,16 @@ pub struct Mob {
     /// Bu adımda çıkarılan ses / atılan tükürük veya ok; `Mobs::tick` toplar.
     pending_sound: Option<Sound>,
     pending_spit: bool,
+    /// Ağ varlık kimliği (`Spawn Entity` paketindeki `entity_id`); atanmadıysa `-1`.
+    pub net_id: i32,
+    /// İstemcide sunucudan gelen son konum ve yön: çizim bu hedefe yumuşakça yaklaşır.
+    pub net_target: Option<([f64; 3], f64)>,
+    /// Köylünün evi (kapı önü). Gece buraya döner, gündüz çevresinde dolaşır.
+    pub home: Option<[f64; 3]>,
+    /// Balığın karada kaldığı süre; dolunca boğulur.
+    breath: f64,
+    /// Balığın hedeflediği dikey hız (su sütununun içinde kalır).
+    vy_target: f64,
 }
 
 impl Mob {
@@ -272,7 +323,46 @@ impl Mob {
             spit_cd: 1.0,
             pending_sound: None,
             pending_spit: false,
+            net_id: -1,
+            net_target: None,
+            home: None,
+            breath: 0.0,
+            vy_target: 0.0,
         }
+    }
+
+    /// İstemci tarafı: yapay zekâ çalıştırmadan, sunucunun bildirdiği konuma
+    /// doğru ara değerle ilerler ve yürüme / koşma animasyonunu hızdan türetir.
+    pub fn animate_remote(&mut self, dt: f64) {
+        self.hurt = (self.hurt - dt * 3.0).max(0.0);
+        self.idle_time += dt;
+        let sc = self.scale();
+        let s = self.kind.stats();
+        self.body.radius = s.radius * sc;
+        self.body.height = s.height * sc;
+        let Some((target, yaw)) = self.net_target else { return };
+        let k = (dt * 10.0).min(1.0);
+        let start = self.body.pos;
+        for a in 0..3 {
+            self.body.pos[a] += (target[a] - self.body.pos[a]) * k;
+        }
+        let mut diff = (yaw - self.yaw).rem_euclid(std::f64::consts::TAU);
+        if diff > std::f64::consts::PI {
+            diff -= std::f64::consts::TAU;
+        }
+        self.yaw += diff * (dt * 8.0).min(1.0);
+        let moved = (self.body.pos[0] - start[0]).hypot(self.body.pos[2] - start[2]);
+        let speed = if dt > 0.0 { moved / dt } else { 0.0 };
+        // Ağ titremesini yumuşatmak için hız da süzülür.
+        self.speed += (speed - self.speed) * (dt * 8.0).min(1.0);
+        self.anim += moved;
+        self.state = if self.speed > s.walk * 1.6 {
+            State::Run
+        } else if self.speed > 0.15 {
+            State::Walk
+        } else {
+            State::Idle
+        };
     }
 
     /// Yarı boyda ve yarı canda yeni doğmuş yavru oluşturur.
@@ -482,6 +572,42 @@ impl Mob {
                     add(c, [0.09, 0.35, 0.09], yaw, angle, skin);
                 }
             }
+            Kind::Fish => {
+                // Küçük gövde, sallanan kuyruk, sırt yüzgeci ve iki göz.
+                // Yüzerken dikey hıza göre hafifçe yatar.
+                let (body, fin, belly) = ([236, 138, 62], [250, 206, 130], [214, 96, 48]);
+                let wag = ((self.anim * 11.0).sin() * 0.5) as f32;
+                let tilt = (self.vy_target * 0.35).clamp(-0.5, 0.5) as f32;
+                add(at(0.0, 0.16, 0.0), [0.065, 0.1, 0.2], yaw, tilt, body);
+                add(at(0.0, 0.1, 0.03), [0.055, 0.05, 0.15], yaw, tilt, belly);
+                add(at(0.0, 0.16, -0.25), [0.014, 0.09, 0.08], yaw + wag, tilt, fin);
+                add(at(0.0, 0.28, 0.0), [0.01, 0.06, 0.08], yaw, tilt, fin);
+                for side in [-0.06, 0.06] {
+                    add(at(side, 0.2, 0.15), [0.015, 0.015, 0.014], yaw, tilt, [26, 26, 32]);
+                }
+            }
+            Kind::Villager => {
+                // Cübbe, yanda kollar, önde kavuşturulmuş eller, iri burun ve
+                // tek kaş. Bacaklar cübbenin altında boşluksuz durur.
+                let (robe, robe_dark, skin, nose, hair) =
+                    ([124, 84, 56], [100, 66, 44], [230, 182, 138], [206, 148, 104], [54, 38, 26]);
+                for (r, sign) in [(-0.11, 1.0), (0.11, -1.0)] {
+                    let (c, h, a) = leg_box(r, 0.52, 0.0, 0.52, 0.1, sign);
+                    add(c, h, yaw, a, robe_dark);
+                }
+                add(at(0.0, 0.98, 0.0), [0.27, 0.46, 0.17], yaw, lean, robe);
+                for r in [-0.31, 0.31] {
+                    add(at(r, 1.2, 0.02), [0.08, 0.24, 0.08], yaw, lean, robe);
+                }
+                add(at(0.0, 1.06, 0.2), [0.16, 0.07, 0.07], yaw, 0.0, robe_dark);
+                add(at(0.0, 1.65, 0.0), [0.2, 0.2, 0.2], yaw + look, 0.0, skin);
+                add(at(0.0, 1.6, 0.22), [0.055, 0.075, 0.06], yaw + look, 0.0, nose);
+                add(at(0.0, 1.71, 0.202), [0.15, 0.022, 0.01], yaw + look, 0.0, [46, 34, 26]);
+                for r in [-0.08, 0.08] {
+                    add(at(r, 1.67, 0.202), [0.032, 0.03, 0.01], yaw + look, 0.0, [34, 34, 42]);
+                }
+                add(at(0.0, 1.83, 0.0), [0.21, 0.05, 0.21], yaw + look, 0.0, hair);
+            }
         }
     }
 
@@ -506,6 +632,10 @@ impl Mob {
 
     /// Bir adım. Yakın dövüş yaratığı bu adımda oyuncuya vurduysa `true` döner.
     pub fn update(&mut self, world: &World, dt: f64, player: [f64; 3], rand: &mut dyn FnMut() -> f64) -> bool {
+        // Balık suda yüzer: yerçekimi ve zemin yürüyüşü yerine kendi hareketi.
+        if self.kind.is_fish() {
+            return self.update_fish(world, dt, player, rand);
+        }
         let s = self.kind.stats();
         self.hurt = (self.hurt - dt * 3.0).max(0.0);
         self.attack_cd = (self.attack_cd - dt).max(0.0);
@@ -594,6 +724,18 @@ impl Mob {
             let (ax, az) = (pos[0] - self.flee_from[0], pos[2] - self.flee_from[1]);
             if ax.hypot(az) > 1e-6 {
                 self.heading = (-ax).atan2(-az);
+            }
+        } else if self.kind.is_villager() {
+            // Köylü evine bağlıdır: gece kapısına döner, gündüz evin
+            // çevresinden fazla uzaklaşmaz.
+            if let Some(home) = self.home {
+                let (hx, hz) = (home[0] - pos[0], home[2] - pos[2]);
+                let limit = if self.night { 1.4 } else { 11.0 };
+                if hx.hypot(hz) > limit {
+                    self.state = State::Walk;
+                    self.heading = (-hx).atan2(-hz);
+                    self.timer = 0.6;
+                }
             }
         } else if self.state == State::Run {
             self.state = State::Idle;
@@ -685,23 +827,121 @@ impl Mob {
         self.speed = if dt > 0.0 { moved / dt } else { 0.0 };
         attacked
     }
+
+    /// Balık hareketi: su sütununun içinde yüzer, oyuncu yaklaşınca kaçar,
+    /// karaya çıkarsa çırpınıp boğulur.
+    fn update_fish(&mut self, world: &World, dt: f64, player: [f64; 3], rand: &mut dyn FnMut() -> f64) -> bool {
+        let s = self.kind.stats();
+        self.hurt = (self.hurt - dt * 3.0).max(0.0);
+        self.timer -= dt;
+        self.idle_time += dt;
+        self.voice -= dt;
+        if self.voice <= 0.0 {
+            self.voice = 9.0 + rand() * 12.0;
+            self.pending_sound.get_or_insert(Sound::Idle);
+        }
+        let pos = self.body.pos;
+        let (bx, bz) = (pos[0].floor() as i32, pos[2].floor() as i32);
+        let by = pos[1].floor() as i32;
+        let submerged = world.get_block(bx, by, bz) == WATER;
+
+        // Karada: çırpınır, bir süre sonra boğulur.
+        if !submerged {
+            self.breath += dt;
+            self.vy_target = 0.0;
+            if self.breath > FISH_BREATH {
+                self.breath = FISH_BREATH * 0.5;
+                self.health -= 1;
+                self.hurt = 1.0;
+            }
+            self.state = State::Run;
+            let f = self.forward();
+            self.body.move_with_collision(world, f[0] * s.walk * dt, 0.0, f[1] * s.walk * dt);
+            self.body.vel[1] = (self.body.vel[1] - GRAVITY * dt).max(-50.0);
+            let vy = self.body.vel[1];
+            self.body.move_with_collision(world, 0.0, vy * dt, 0.0);
+            if self.body.on_ground {
+                self.body.vel[1] = JUMP_SPEED * 0.4;
+                self.heading = rand() * std::f64::consts::TAU;
+            }
+            self.body.on_ground = false;
+            self.yaw = self.heading;
+            self.anim += 0.4;
+            return false;
+        }
+
+        self.breath = 0.0;
+        let (px, pz) = (player[0] - pos[0], player[2] - pos[2]);
+        // Oyuncu yaklaşınca kaçar; yoksa rastgele yön ve derinlik seçer.
+        if px.hypot(pz) < 4.5 && (player[1] - pos[1]).abs() < 3.0 {
+            self.state = State::Run;
+            self.heading = px.atan2(pz); // oyuncudan uzağa
+            self.timer = 0.6;
+        } else if self.timer <= 0.0 {
+            self.state = if rand() < 0.3 { State::Idle } else { State::Walk };
+            self.heading = rand() * std::f64::consts::TAU;
+            self.vy_target = (rand() - 0.5) * s.walk;
+            self.timer = 1.2 + rand() * 2.4;
+        }
+        // Su sütununun içinde kal: yüzeye çıkmak üzereyse aşağı, tabana
+        // yaklaşıyorsa yukarı yüzer.
+        let head = (pos[1] + self.body.height).floor() as i32;
+        let foot = (pos[1] - 0.05).floor() as i32;
+        if world.get_block(bx, head + 1, bz) != WATER {
+            self.vy_target = -s.walk * 0.7;
+        } else if world.get_block(bx, foot - 1, bz) != WATER {
+            self.vy_target = s.walk * 0.7;
+        }
+        let mut diff = (self.heading - self.yaw).rem_euclid(std::f64::consts::TAU);
+        if diff > std::f64::consts::PI {
+            diff -= std::f64::consts::TAU;
+        }
+        self.yaw += diff * (dt * 6.0).min(1.0);
+        let f = self.forward();
+        let mut speed = match self.state {
+            State::Idle => 0.0,
+            State::Walk => s.walk,
+            State::Run => s.run,
+        };
+        // Önündeki hücre su değilse (kıyı) karaya çıkmaz: döner.
+        let ahead = [
+            (pos[0] + f[0] * 0.45).floor() as i32,
+            (pos[1] + self.body.height * 0.5).floor() as i32,
+            (pos[2] + f[1] * 0.45).floor() as i32,
+        ];
+        if world.get_block(ahead[0], ahead[1], ahead[2]) != WATER {
+            self.heading += std::f64::consts::PI * (0.5 + rand() * 0.8);
+            speed = 0.0;
+        }
+        let want = (f[0] * speed * dt).hypot(f[1] * speed * dt);
+        let start = self.body.pos;
+        self.body.move_with_collision(world, f[0] * speed * dt, self.vy_target * dt, f[1] * speed * dt);
+        let moved = (self.body.pos[0] - start[0]).hypot(self.body.pos[2] - start[2]);
+        // Önü kapalıysa (kaya, kıyı) döner.
+        if want > 1e-6 && moved < want * 0.5 {
+            self.heading += std::f64::consts::PI * (0.5 + rand() * 0.8);
+        }
+        self.anim += moved;
+        self.speed = if dt > 0.0 { moved / dt } else { 0.0 };
+        false
+    }
 }
 
 pub enum MobEvent {
-    /// Yakın dövüş yaratığı oyuncuya vurdu.
-    Attack(i32),
-    /// İskelet oku oyuncuya isabet etti.
-    ArrowHit(i32),
-    /// Bir canlı öldü (ganimet ve parçacıklar için).
-    Died(Kind, [f64; 3]),
+    /// Yakın dövüş yaratığı `(oyuncu sırası, hasar)` oyuncuya vurdu.
+    Attack(usize, i32),
+    /// İskelet oku `(oyuncu sırası, hasar)` oyuncuya isabet etti.
+    ArrowHit(usize, i32),
+    /// Bir canlı öldü: `(tür, konum, ağ kimliği)` (ganimet ve parçacıklar için).
+    Died(Kind, [f64; 3], i32),
     /// Bir canlı ses çıkardı.
     Sound(Kind, Sound, [f64; 3]),
     /// Bir yavru doğdu.
     Born(Kind, [f64; 3]),
     /// Zehir tükürüğü ya da ok bir yere çarptı.
     SpitHit([f64; 3]),
-    /// Zehir tükürüğü oyuncuya isabet etti.
-    Poison,
+    /// Zehir tükürüğü `(oyuncu sırası)` oyuncuya isabet etti.
+    Poison(usize),
 }
 
 /// Havada uçan zehir tükürüğü veya iskelet oku.
@@ -718,11 +958,28 @@ pub struct Mobs {
     rng: u32,
     spawn_timer: f64,
     breed_timer: f64,
+    /// Balık ve köylü doğurma zamanlayıcıları (ayrı halkalar).
+    fish_timer: f64,
+    village_timer: f64,
+    /// Çok oyunculuda doğmanın denendiği oyuncunun sırası.
+    spawn_turn: usize,
+    /// Ağ üzerinden senkronize edilen canlılara atanan artan kimlik.
+    pub next_id: i32,
 }
 
 impl Default for Mobs {
     fn default() -> Self {
-        Self { list: Vec::new(), spits: Vec::new(), rng: 0x9e37_79b9, spawn_timer: 2.0, breed_timer: 1.0 }
+        Self {
+            list: Vec::new(),
+            spits: Vec::new(),
+            rng: 0x9e37_79b9,
+            spawn_timer: 2.0,
+            breed_timer: 1.0,
+            fish_timer: 1.5,
+            village_timer: 0.5,
+            spawn_turn: 0,
+            next_id: 1000,
+        }
     }
 }
 
@@ -747,13 +1004,32 @@ impl Mobs {
         self.rng as f64 / 4_294_967_296.0
     }
 
+    fn alloc_id(&mut self) -> i32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1000);
+        id
+    }
+
     pub fn count(&self, hostile: bool) -> usize {
-        self.list.iter().filter(|m| m.kind.hostile() == hostile).count()
+        self.list
+            .iter()
+            .filter(|m| m.kind.wild() && m.kind.hostile() == hostile)
+            .count()
+    }
+
+    pub fn count_fish(&self) -> usize {
+        self.list.iter().filter(|m| m.kind.is_fish()).count()
+    }
+
+    pub fn count_villagers(&self) -> usize {
+        self.list.iter().filter(|m| m.kind.is_villager()).count()
     }
 
     pub fn spawn(&mut self, kind: Kind, pos: [f64; 3]) {
         let yaw = self.rand() * std::f64::consts::TAU;
-        self.list.push(Mob::new(kind, pos, yaw));
+        let mut mob = Mob::new(kind, pos, yaw);
+        mob.net_id = self.alloc_id();
+        self.list.push(mob);
     }
 
     /// Oyuncunun çevresinde, görüş alanının biraz uzağında yeni canlı dener.
@@ -762,7 +1038,7 @@ impl Mobs {
         let near_animals = self
             .list
             .iter()
-            .filter(|m| !m.kind.hostile() && (m.body.pos[0] - player[0]).hypot(m.body.pos[2] - player[2]) < DESPAWN_DIST)
+            .filter(|m| m.kind.wild() && !m.kind.hostile() && (m.body.pos[0] - player[0]).hypot(m.body.pos[2] - player[2]) < DESPAWN_DIST)
             .count();
         if !hostile && near_animals >= MAX_ANIMALS {
             return;
@@ -792,8 +1068,72 @@ impl Mobs {
         } else {
             [Kind::Sheep, Kind::Pig, Kind::Chicken, Kind::Cow][(self.rand() * 4.0) as usize % 4]
         };
-        let mob = Mob::new(kind, pos, angle);
+        let mut mob = Mob::new(kind, pos, angle);
         if !mob.body.collides(world) {
+            mob.net_id = self.alloc_id();
+            self.list.push(mob);
+        }
+    }
+
+    /// Oyuncunun çevresindeki su sütunlarında balık doğurur. Su yoksa (ya da
+    /// sütun bir bloktan sığsa) hiçbir şey yapmaz.
+    fn try_spawn_fish(&mut self, world: &World, player: [f64; 3]) {
+        if self.count_fish() >= MAX_FISH {
+            return;
+        }
+        let angle = self.rand() * std::f64::consts::TAU;
+        let dist = 8.0 + self.rand() * 26.0;
+        let (x, z) = ((player[0] + angle.cos() * dist).floor() as i32, (player[2] + angle.sin() * dist).floor() as i32);
+        // Yukarıdan aşağı: ilk su bloğu yüzey, ilk katı blok taban.
+        let mut top = None;
+        for y in (1..WORLD_HEIGHT).rev() {
+            let b = world.get_block(x, y, z);
+            if b == WATER {
+                top = Some(y);
+                break;
+            }
+            if is_solid(b) {
+                return;
+            }
+        }
+        let Some(top) = top else { return };
+        let mut bottom = top;
+        while bottom > 1 && world.get_block(x, bottom - 1, z) == WATER {
+            bottom -= 1;
+        }
+        if top - bottom < 1 {
+            return;
+        }
+        let y = bottom + (self.rand() * (top - bottom) as f64) as i32;
+        let pos = [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5];
+        let mut mob = Mob::new(Kind::Fish, pos, angle);
+        if !mob.body.collides(world) {
+            mob.net_id = self.alloc_id();
+            self.list.push(mob);
+        }
+    }
+
+    /// Yakındaki bir köy evinin kapısında köylü doğurur. Aynı evde zaten bir
+    /// köylü varsa yenisi gelmez; köylüler kalıcıdır (uzaklaşınca silinmez).
+    fn try_spawn_villager(&mut self, world: &World, player: [f64; 3]) {
+        if self.count_villagers() >= MAX_VILLAGERS {
+            return;
+        }
+        let homes = world.village_homes(player[0] as i32, player[2] as i32, 64);
+        if homes.is_empty() {
+            return;
+        }
+        let home = homes[(self.rand() * homes.len() as f64) as usize % homes.len()];
+        if self.list.iter().any(|m| {
+            m.kind.is_villager() && (m.body.pos[0] - home[0]).hypot(m.body.pos[2] - home[2]) < 6.0
+        }) {
+            return;
+        }
+        let mut mob = Mob::new(Kind::Villager, home, self.rand() * std::f64::consts::TAU);
+        mob.home = Some(home);
+        mob.persistent = true;
+        if !mob.body.collides(world) {
+            mob.net_id = self.alloc_id();
             self.list.push(mob);
         }
     }
@@ -837,7 +1177,7 @@ impl Mobs {
         true
     }
 
-    /// Tüm canlıları bir adım ilerletir; olanları `events`'e yazar.
+    /// Tüm canlıları tek oyunculu oyunda bir adım ilerletir; olanları `events`'e yazar.
     pub fn tick(
         &mut self,
         world: &World,
@@ -847,10 +1187,42 @@ impl Mobs {
         torches: &[[i32; 3]],
         events: &mut Vec<MobEvent>,
     ) {
+        self.tick_multi(world, dt, &[player], night, torches, events);
+    }
+
+    /// Çok oyunculu adım: her canlı **en yakın** oyuncuyu hedefler, doğma
+    /// sırayla oyuncuların çevresinde denenir ve canlı ancak tüm oyunculardan
+    /// uzaklaşınca silinir. Olaylardaki oyuncu sırası `players` dizisindeki sıradır.
+    pub fn tick_multi(
+        &mut self,
+        world: &World,
+        dt: f64,
+        players: &[[f64; 3]],
+        night: bool,
+        torches: &[[i32; 3]],
+        events: &mut Vec<MobEvent>,
+    ) {
+        if players.is_empty() {
+            return;
+        }
         self.spawn_timer -= dt;
         if self.spawn_timer <= 0.0 {
-            self.spawn_timer = 1.5;
-            self.try_spawn(world, player, night, torches);
+            self.spawn_timer = 1.5 / players.len() as f64;
+            self.spawn_turn = (self.spawn_turn + 1) % players.len();
+            self.try_spawn(world, players[self.spawn_turn], night, torches);
+        }
+
+        // Balıklar suda, köylüler evlerinde doğar; ikisi de yabani hayvan
+        // sınırından bağımsızdır.
+        self.fish_timer -= dt;
+        if self.fish_timer <= 0.0 {
+            self.fish_timer = 2.5;
+            self.try_spawn_fish(world, players[self.spawn_turn]);
+        }
+        self.village_timer -= dt;
+        if self.village_timer <= 0.0 {
+            self.village_timer = 3.0;
+            self.try_spawn_villager(world, players[self.spawn_turn]);
         }
 
         self.breed_timer -= dt;
@@ -859,7 +1231,15 @@ impl Mobs {
             self.breed(night, events);
         }
 
-        let chest = [player[0], player[1] + 0.9, player[2]];
+        let nearest = |p: [f64; 3]| -> usize {
+            (0..players.len())
+                .min_by(|&a, &b| {
+                    let d = |i: usize| (players[i][0] - p[0]).powi(2) + (players[i][2] - p[2]).powi(2);
+                    d(a).total_cmp(&d(b))
+                })
+                .unwrap_or(0)
+        };
+        let chests: Vec<[f64; 3]> = players.iter().map(|p| [p[0], p[1] + 0.9, p[2]]).collect();
         let mut rng = self.rng;
         let mut rand = move || {
             rng ^= rng << 13;
@@ -875,8 +1255,11 @@ impl Mobs {
                 continue;
             }
             m.night = night;
+            let target = nearest(m.body.pos);
+            let player = players[target];
+            let chest = chests[target];
             if m.update(world, dt, player, &mut rand) {
-                events.push(MobEvent::Attack(ZOMBIE_DAMAGE));
+                events.push(MobEvent::Attack(target, ZOMBIE_DAMAGE));
             }
             if let Some(sound) = m.pending_sound.take() {
                 events.push(MobEvent::Sound(m.kind, sound, m.body.pos));
@@ -915,12 +1298,12 @@ impl Mobs {
                 for a in 0..3 {
                     s.pos[a] += s.vel[a] * dt / steps as f64;
                 }
-                let d2 = (0..3).map(|a| (s.pos[a] - chest[a]).powi(2)).sum::<f64>();
-                if d2 < 0.75 * 0.75 {
+                let hit = chests.iter().position(|c| (0..3).map(|a| (s.pos[a] - c[a]).powi(2)).sum::<f64>() < 0.75 * 0.75);
+                if let Some(target) = hit {
                     if s.arrow {
-                        events.push(MobEvent::ArrowHit(ARROW_DAMAGE));
+                        events.push(MobEvent::ArrowHit(target, ARROW_DAMAGE));
                     } else {
-                        events.push(MobEvent::Poison);
+                        events.push(MobEvent::Poison(target));
                     }
                     events.push(MobEvent::SpitHit(s.pos));
                     return false;
@@ -935,18 +1318,19 @@ impl Mobs {
 
         self.list.retain(|m| {
             if m.health <= 0 {
-                events.push(MobEvent::Died(m.kind, m.body.pos));
+                events.push(MobEvent::Died(m.kind, m.body.pos, m.net_id));
                 return false;
             }
             let p = m.body.pos;
-            p[1] > -10.0 && (m.persistent || (p[0] - player[0]).hypot(p[2] - player[2]) < DESPAWN_DIST)
+            let near = players.iter().any(|pl| (p[0] - pl[0]).hypot(p[2] - pl[2]) < DESPAWN_DIST);
+            p[1] > -10.0 && (m.persistent || near)
         });
     }
 
     /// Üreme: üremeye hazır iki yetişkin yan yanaysa bir yavru doğar; uzaktaysa
     /// birbirlerine doğru çekilirler. Yaratıklar yalnızca gece ürer.
     fn breed(&mut self, night: bool, events: &mut Vec<MobEvent>) {
-        let ready = |m: &Mob| m.adult() && m.breed_cd == 0.0 && m.health > 0 && m.state != State::Run;
+        let ready = |m: &Mob| m.kind.breedable() && m.adult() && m.breed_cd == 0.0 && m.health > 0 && m.state != State::Run;
         for m in self.list.iter_mut() {
             m.lure = None;
         }
@@ -978,7 +1362,8 @@ impl Mobs {
                     self.list[j].persistent = true;
                 }
                 let pos = [(a[0] + b[0]) * 0.5, a[1].max(b[1]) + 0.1, (a[2] + b[2]) * 0.5];
-                let baby = Mob::new_baby(kind, pos, self.rand() * std::f64::consts::TAU);
+                let mut baby = Mob::new_baby(kind, pos, self.rand() * std::f64::consts::TAU);
+                baby.net_id = self.alloc_id();
                 self.list.push(baby);
                 events.push(MobEvent::Born(kind, pos));
             } else {
@@ -1022,10 +1407,16 @@ impl Mobs {
                 return Err(Error::InvalidValue);
             }
             let mut m = Mob::new(kind, pos, yaw);
+            m.net_id = self.alloc_id();
             m.health = health.min(kind.stats().health);
             m.age = age;
             m.breed_cd = breed_cd;
             m.persistent = persistent;
+            // Köylü kayıttan dönerken evini kaybetmesin: kaydedildiği yeri
+            // yeni evi sayar.
+            if kind.is_villager() {
+                m.home = Some(pos);
+            }
             let sc = m.scale();
             m.body.radius = kind.stats().radius * sc;
             m.body.height = kind.stats().height * sc;
@@ -1099,8 +1490,10 @@ mod tests {
                 w.generate_chunk(dx, dz);
             }
         }
-        for x in -40..40 {
-            for z in -40..40 {
+        // Üretilen bütün chunk'ları (16×3 → -48..47) düzleştir: kenarda kalan
+        // doğal okyanus balık doğurma testlerini bozmasın.
+        for x in -48..48 {
+            for z in -48..48 {
                 for y in 0..20 {
                     w.set_block_raw(x, y, z, STONE);
                 }
@@ -1209,7 +1602,7 @@ mod tests {
         let mut ev = Vec::new();
         mobs.tick(&w, 0.02, AWAY, false, &[], &mut ev);
         assert!(mobs.list.is_empty());
-        assert!(ev.iter().any(|e| matches!(e, MobEvent::Died(Kind::Chicken, _))));
+        assert!(ev.iter().any(|e| matches!(e, MobEvent::Died(Kind::Chicken, _, _))));
         assert_eq!(Kind::Chicken.stats().drop, Some((MEAT, 1)));
         assert_eq!(Kind::Zombie.stats().drop, Some((APPLE, 1)));
         assert_eq!(Kind::Shroom.stats().drop, Some((MUSHROOM, 1)));
@@ -1408,7 +1801,7 @@ mod tests {
             mobs.tick(&w, 0.05, player, true, &[], &mut ev);
         }
         let spat = ev.iter().filter(|e| matches!(e, MobEvent::Sound(Kind::Shroom, Sound::Spit, _))).count();
-        let poisoned = ev.iter().filter(|e| matches!(e, MobEvent::Poison)).count();
+        let poisoned = ev.iter().filter(|e| matches!(e, MobEvent::Poison(_))).count();
         assert!((3..=5).contains(&spat), "10 saniyede aralıklı tükürmeli: {spat}");
         assert!(poisoned >= 2, "duran oyuncuya isabet etmeli: {poisoned}");
         assert!(mobs.spits.len() <= 1);
@@ -1439,7 +1832,7 @@ mod tests {
             mobs.tick(&w, 0.05, [6.5, 21.0, 0.5], true, &[], &mut ev);
         }
         assert!(ev.iter().any(|e| matches!(e, MobEvent::SpitHit(_))), "tükürük duvara çarpmalı");
-        assert!(!ev.iter().any(|e| matches!(e, MobEvent::Poison)), "duvarın arkasındaki oyuncu zehirlenmemeli");
+        assert!(!ev.iter().any(|e| matches!(e, MobEvent::Poison(_))), "duvarın arkasındaki oyuncu zehirlenmemeli");
     }
 
     #[test]
@@ -1479,6 +1872,8 @@ mod tests {
             Kind::Shroom,
             Kind::Spider,
             Kind::Skeleton,
+            Kind::Fish,
+            Kind::Villager,
         ] {
             let mut m = Mob::new(kind, [0.0, 21.0, -10.0], 0.7);
             m.state = State::Run;
@@ -1554,10 +1949,144 @@ mod tests {
             mobs.tick(&w, 0.05, player, true, &[], &mut ev);
         }
         let shots = ev.iter().filter(|e| matches!(e, MobEvent::Sound(Kind::Skeleton, Sound::Shoot, _))).count();
-        let hits = ev.iter().filter(|e| matches!(e, MobEvent::ArrowHit(ARROW_DAMAGE))).count();
+        let hits = ev.iter().filter(|e| matches!(e, MobEvent::ArrowHit(0, ARROW_DAMAGE))).count();
         assert!(shots >= 3, "iskelet aralıklı ok atmalı: {shots}");
         assert!(hits >= 2, "ok oyuncuya isabet etmeli: {hits}");
         assert_eq!(Kind::Skeleton.stats().drop, Some((BONE, 2)));
+    }
+
+    /// Ortası su dolu düz dünya: 41×41 göl, iki blok derinliğinde.
+    fn lake() -> World {
+        let mut w = flat();
+        for x in -20..=20 {
+            for z in -20..=20 {
+                w.set_block_raw(x, 19, z, WATER);
+                w.set_block_raw(x, 20, z, WATER);
+            }
+        }
+        w
+    }
+
+    fn fish_rand(seed: u32) -> impl FnMut() -> f64 {
+        let mut s = seed;
+        move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f64 / 4_294_967_296.0
+        }
+    }
+
+    #[test]
+    fn fish_swim_inside_water_and_never_beach_themselves() {
+        let w = lake();
+        let mut m = Mob::new(Kind::Fish, [0.5, 19.4, 0.5], 0.0);
+        let mut rand = fish_rand(4242);
+        let mut travelled = 0.0;
+        let mut last = m.body.pos;
+        for _ in 0..800 {
+            m.update(&w, 0.02, [40.5, 21.0, 40.5], &mut rand);
+            travelled += (m.body.pos[0] - last[0]).hypot(m.body.pos[2] - last[2]);
+            last = m.body.pos;
+            let b = w.get_block(m.body.pos[0].floor() as i32, m.body.pos[1].floor() as i32, m.body.pos[2].floor() as i32);
+            assert_eq!(b, WATER, "balık sudan çıktı: {:?}", m.body.pos);
+            assert!((18.9..21.0).contains(&m.body.pos[1]), "dikey aralık: {}", m.body.pos[1]);
+        }
+        assert_eq!(m.health, Kind::Fish.stats().health, "suda can kaybetmemeli");
+        assert!(travelled > 1.5, "balık yüzmeli: {travelled}");
+    }
+
+    #[test]
+    fn fish_flee_from_the_player_underwater() {
+        let w = lake();
+        let mut m = Mob::new(Kind::Fish, [0.5, 19.5, 0.5], 0.0);
+        let mut rand = fish_rand(7);
+        // Oyuncu dibinde: balık koşarak uzaklaşır.
+        for _ in 0..40 {
+            m.update(&w, 0.02, [1.2, 21.0, 0.5], &mut rand);
+        }
+        assert_eq!(m.state, State::Run);
+        assert!(m.body.pos[0] < -1.0, "oyuncudan uzaklaşmalı: x={}", m.body.pos[0]);
+    }
+
+    #[test]
+    fn a_beached_fish_flops_and_suffocates() {
+        let w = flat();
+        let mut m = Mob::new(Kind::Fish, [0.5, 21.0, 0.5], 0.0);
+        let mut rand = fish_rand(11);
+        for _ in 0..400 {
+            m.update(&w, 0.02, [40.5, 21.0, 40.5], &mut rand);
+        }
+        assert!(m.health < Kind::Fish.stats().health, "karada boğulmalı: {}", m.health);
+        assert!(m.body.pos[1] > 20.0, "zeminde çırpınmalı");
+    }
+
+    #[test]
+    fn villagers_keep_to_their_home_and_return_at_night() {
+        let w = flat();
+        let home = [0.5, 21.0, 0.5];
+        let mut m = Mob::new(Kind::Villager, [15.5, 21.0, 0.5], 0.0);
+        m.home = Some(home);
+        m.night = false;
+        let mut rand = fish_rand(21);
+        // Gündüz: evin çevresinde kalır (11 blok + bir adım payı).
+        for _ in 0..600 {
+            m.update(&w, 0.02, [40.5, 21.0, 40.5], &mut rand);
+        }
+        let d = (m.body.pos[0] - home[0]).hypot(m.body.pos[2] - home[2]);
+        assert!(d <= 13.0, "gündüz evinden uzaklaştı: {d}");
+
+        // Gece: kapısına döner.
+        m.night = true;
+        m.body.pos = [15.5, 21.0, 0.5];
+        for _ in 0..900 {
+            m.update(&w, 0.02, [40.5, 21.0, 40.5], &mut rand);
+        }
+        let d = (m.body.pos[0] - home[0]).hypot(m.body.pos[2] - home[2]);
+        assert!(d < 2.5, "gece eve dönmedi: {d}");
+    }
+
+    #[test]
+    fn fish_spawn_only_in_water_and_villagers_only_at_village_doors() {
+        let mut mobs = Mobs::default();
+        let dry = flat();
+        for _ in 0..120 {
+            mobs.try_spawn_fish(&dry, [0.5, 21.0, 0.5]);
+        }
+        assert_eq!(mobs.count_fish(), 0, "karada balık doğmamalı");
+
+        let wet = lake();
+        for _ in 0..200 {
+            mobs.try_spawn_fish(&wet, [0.5, 21.0, 0.5]);
+        }
+        assert!(mobs.count_fish() > 0, "gölde balık doğmalı");
+        assert!(mobs.count_fish() <= MAX_FISH);
+        for m in mobs.list.iter().filter(|m| m.kind.is_fish()) {
+            assert!((19.0..21.0).contains(&m.body.pos[1]), "su dışında doğdu: {}", m.body.pos[1]);
+        }
+
+        // Gerçek dünyada bir köy bulup kapısında köylü doğur.
+        mobs.list.clear();
+        let mut w = World::new(20261012);
+        let v = (0..400)
+            .find_map(|i| w.village_at(i % 20 - 10, i / 20 - 20))
+            .expect("köy bulunamadı");
+        for cz in ((v.cz - 30) >> 4)..=((v.cz + 30) >> 4) {
+            for cx in ((v.cx - 30) >> 4)..=((v.cx + 30) >> 4) {
+                w.generate_chunk(cx, cz);
+            }
+        }
+        let p = [v.cx as f64, v.base as f64, v.cz as f64];
+        for _ in 0..60 {
+            mobs.try_spawn_villager(&w, p);
+        }
+        assert!(mobs.count_villagers() > 0, "köyde köylü doğmalı");
+        assert!(mobs.count_villagers() <= MAX_VILLAGERS);
+        assert!(
+            mobs.list.iter().filter(|m| m.kind.is_villager()).all(|m| m.persistent && m.home.is_some()),
+            "köylüler kalıcı olmalı ve evlerini bilmeli"
+        );
+        assert_eq!(mobs.count(false), 0, "köylü yabani hayvan sayılmamalı");
     }
 
     #[test]
